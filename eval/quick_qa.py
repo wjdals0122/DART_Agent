@@ -74,7 +74,9 @@ def main() -> int:
     ap.add_argument("--fy", type=int, default=None, help="사업연도 (report_nm 의 (YYYY.MM))")
     ap.add_argument("--top-k", type=int, default=5)
     ap.add_argument("--dry-run", action="store_true", help="LLM 호출 없이 1·2 만 출력")
-    ap.add_argument("--model", default=None, help=f"기본 {clova.DEFAULT_MODEL}")
+    ap.add_argument("--model", default=None,
+                    help="비우면 CLOVA_MODEL 환경변수, 그것도 없으면 "
+                         + clova.FALLBACK_MODEL)
     ap.add_argument("--max-tokens", type=int, default=1024)
     ap.add_argument("--temperature", type=float, default=0.1)
     ap.add_argument("--device", default="cuda", help="cuda / cpu")
@@ -86,7 +88,7 @@ def main() -> int:
         if err:
             print(f"[중단] {err}", file=sys.stderr)
             return 2
-        print(f"[key] {clova.mask_key(key)}")
+        print(f"[key] {clova.mask_key(key)} · [model] {clova.resolve_model(a.model)}")
 
     if not SYSTEM_PATH.exists():
         print(f"[중단] 시스템 프롬프트가 없다: {SYSTEM_PATH}", file=sys.stderr)

@@ -16,6 +16,11 @@
 - 키가 없거나 빈 문자열이면 호출하지 않고 곧바로 실패를 반환한다.
   (빈 키로 부르면 401 이 오고, 그걸 API 장애로 오진하기 쉽다)
 
+【모델 이름】
+코드에 박지 않는다. `resolve_model()` 이 인자 > 환경변수 `CLOVA_MODEL` > `FALLBACK_MODEL`
+순으로 고른다. `.env` 에 `CLOVA_MODEL=HCX-007` 을 넣으면 코드를 안 고치고 바꿀 수 있다.
+반환 dict 의 `model` 은 **실제로 호출한 이름**이다.
+
   python -m src.agent.clova            # 키 존재만 확인 (마스킹 출력)
   python -m src.agent.clova --ping     # 실제 호출 1건
 """
@@ -36,10 +41,20 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parents[2]
 
 # 아래 4개는 문서에서 확인한 값이다.
-HOST = os.environ.get("CLOVA_API_HOST", "https://clovastudio.stream.ntruss.com")
+DEFAULT_HOST = "https://clovastudio.stream.ntruss.com"
 PATH_FMT = "/v3/chat-completions/{model}"
-DEFAULT_MODEL = os.environ.get("CLOVA_MODEL", "HCX-005")  # 128k 컨텍스트. 문서 예시 모델
+FALLBACK_MODEL = "HCX-005"   # 128k 컨텍스트. 문서 예시 모델
 OK_CODE = "20000"      # 문서상 성공 status.code
+
+# 추론형 모델은 maxTokens 를 거부하고 maxCompletionTokens 를 요구한다. 실측:
+#   HCX-007 + maxTokens        -> 400 40001 "Invalid parameter: maxTokens"
+#   HCX-007 + maxCompletionTokens -> 200
+# 문서에도 두 필드는 함께 쓸 수 없다고 되어 있다.
+REASONING_MODELS = {"HCX-007"}
+
+# 모델·호스트는 **모듈을 읽을 때가 아니라 부를 때** 환경에서 꺼낸다.
+# import 시점에 os.environ 을 읽으면 .env 가 아직 로드되기 전이라
+# .env 에 적어 둔 CLOVA_MODEL 이 조용히 무시된다. 실제로 그랬다.
 
 TIMEOUT = 60
 MAX_RETRY = 2          # 429/5xx 에 대해 지수 백오프로 2회까지
@@ -54,6 +69,19 @@ def _load_env() -> None:
         # .env 내용 자체는 출력하지 않는다
         load_dotenv(ROOT / ".env", override=False)
         _env_loaded = True
+
+
+def resolve_model(model=None) -> str:
+    """쓸 모델 이름 하나. 인자 > 환경변수 CLOVA_MODEL > FALLBACK_MODEL 순."""
+    if model:
+        return str(model).strip()
+    _load_env()
+    return (os.environ.get("CLOVA_MODEL") or "").strip() or FALLBACK_MODEL
+
+
+def resolve_host() -> str:
+    _load_env()
+    return (os.environ.get("CLOVA_API_HOST") or "").strip() or DEFAULT_HOST
 
 
 def get_api_key():
@@ -119,22 +147,29 @@ def _extract_text(raw: dict):
 
 
 def chat(messages, max_tokens: int = 1024, temperature: float = 0.1,
-         model=None, request_id=None) -> dict:
+         model=None, request_id=None, extra=None) -> dict:
     """성공 {"ok":True,"text","raw","elapsed"} / 실패 {"ok":False,"error","status"}.
 
     어떤 입력에도 예외를 던지지 않는다. temperature 0.1 은 같은 질문에 같은 답이
     나와야 비교가 가능해서다.
+
+    `extra` 는 요청 본문에 그대로 합쳐진다. 도구 호출(`tools`, `toolChoice`)이나
+    추론 강도(`thinking`) 처럼 이 함수가 모르는 필드를 넘길 때 쓴다.
+    도구 호출이 오면 `tool_calls` 키에 result.message.toolCalls 를 담아 돌려준다.
     """
     key, err = get_api_key()
     if err:
         return {"ok": False, "error": err, "status": None, "elapsed": 0.0}
 
-    model = model or DEFAULT_MODEL
-    url = HOST + PATH_FMT.format(model=model)
+    model = resolve_model(model)
+    url = resolve_host() + PATH_FMT.format(model=model)
+    tok_field = "maxCompletionTokens" if model in REASONING_MODELS else "maxTokens"
     try:
         body = {"messages": _norm_messages(messages),
-                "maxTokens": int(max_tokens),
+                tok_field: int(max_tokens),
                 "temperature": float(temperature)}
+        if extra:
+            body.update(dict(extra))
     except (KeyError, TypeError, ValueError) as e:
         return {"ok": False, "error": f"messages 형식 오류: {type(e).__name__}: {e}",
                 "status": None, "elapsed": 0.0}
@@ -182,14 +217,17 @@ def chat(messages, max_tokens: int = 1024, temperature: float = 0.1,
             return {"ok": False, "status": r.status_code, "elapsed": elapsed,
                     "raw": raw, "error": f"CLOVA status {code}: {msg}"}
 
+        result = (raw or {}).get("result") or {}
+        tool_calls = ((result.get("message") or {}).get("toolCalls")) or []
         text = _extract_text(raw)
-        if text is None:
+        # 도구 호출 응답은 content 가 빈 문자열이다. 그건 실패가 아니다.
+        if text is None and not tool_calls:
             return {"ok": False, "status": r.status_code, "elapsed": elapsed,
                     "raw": raw, "error": "응답에서 result.message.content 를 찾지 못했다"}
 
-        result = (raw or {}).get("result") or {}
-        return {"ok": True, "text": text, "raw": raw, "elapsed": elapsed,
+        return {"ok": True, "text": text or "", "raw": raw, "elapsed": elapsed,
                 "status": r.status_code, "model": model,
+                "tool_calls": tool_calls,
                 "finish_reason": result.get("finishReason"),
                 "usage": result.get("usage")}
 
@@ -201,7 +239,8 @@ def _main() -> int:
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--ping", action="store_true", help="실제 호출 1건")
-    ap.add_argument("--model", default=None)
+    ap.add_argument("--model", default=None,
+                    help="비우면 CLOVA_MODEL 환경변수, 그것도 없으면 " + FALLBACK_MODEL)
     a = ap.parse_args()
 
     key, err = get_api_key()
@@ -210,6 +249,7 @@ def _main() -> int:
         return 2
     if not a.ping:
         return 0
+    print(f"[model] {resolve_model(a.model)}  [host] {resolve_host()}")
     print("[headers]", safe_headers(build_headers(key)))
     res = chat([{"role": "user", "content": "안녕. 한 문장으로 답해라."}],
                max_tokens=64, model=a.model)
