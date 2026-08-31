@@ -8,6 +8,12 @@
   ...본문...
   </document>
 
+정정 전 자료(preserved)면 그 위에 경고 줄이 한 줄 더 붙는다.
+
+  ※ 자동 주석(공시 원문 아님): 정정 전 자료(접수 2026-03-13).
+    이후 정정본(접수 2026-06-19, 접수번호 20260619000667)이 제출되었으므로
+    이 수치는 최종값이 아닐 수 있다
+
 【자동 주석이 태그 바깥에 있는 이유】
 공시 원문에서 유도한 값이 아니라 **메타데이터에서 계산한 추정**이다. 태그 안에 넣으면
 모델이 원문과 구분할 수 없다. 바깥 윗줄에 두고, system 프롬프트에서 "원문과 어긋나면
@@ -17,28 +23,67 @@
 본문에 "</document>" 가 들어 있으면 그 뒤부터는 모델이 공시 원문이 아니라 지시문으로
 읽을 수 있다. "[/document]" 로 치환한다.
 
-【당기 연도를 무엇으로 잡는가 — 사양과 다른 점, 보고서에 명시함】
+【기수 -> 달력연도 환산은 '문서 단위' 로 한다 — 2026-08-31 변경】
+예전 규칙은 "청크에 나온 가장 큰 기수 = 당기" 였다. 청크가 문서의 당기를 담고 있지
+않으면 그대로 어긋난다. 정기보고서 40개 실측에서 주석 1,085건 중 232건(21.4%)이
+기준을 잘못 잡았고, 'VI. 이사회 등' 절은 89.9% 가 틀렸다.
+(예: CJ제일제당 분기보고서(2023.09)는 당기가 제17기인데, 제16기만 실린 청크에
+ "제16기=2023년" 이 붙었다. 실제로는 2022년이다.)
+
+그래서 문서마다 **재무제표 절에서 당기 기수를 한 번 구해** 표로 만들어 두고
+(`data/index/doc_fiscal_map.json`), 청크의 기수를 그 표에 대고 환산한다.
+
+  python -m src.agent.context --build
+
+실패하면 지어내지 않고 주석을 생략한다.
+  - 문서가 표에 없다            -> 생략 (접수 연도로 때우지 않는다)
+  - 청크의 기수 > 표의 당기 기수 -> 생략 + reports/annotate_era_overflow.jsonl 에 기록
+  - 이벤트 공시(major/exchange/holding) -> 애초에 표에 넣지 않는다
+
+【당기 '연도' 는 fiscal_year 다 — 사양과 다른 점, 보고서에 명시함】
 사양은 "base_year 를 당기 연도로 삼는다" 였는데, 이 리포에서 `base_year` 는 **접수 연도**다
 (id_map 기준. CLAUDE.md 와 hybrid.py 주석에도 같은 경고가 있다).
 2024 사업연도 사업보고서는 2025년에 접수되므로 base_year=2025 이고, 이걸 당기로 쓰면
 "제56기=2025년" 이라는 틀린 주석이 나간다. 그래서 report_nm 의 '(2024.12)' 에서 뽑은
-`fiscal_year` 를 당기 연도로 쓴다. fiscal_year 가 없으면(이벤트 공시 등) 접수 연도로
-때우지 않고 **주석을 통째로 생략한다**. 추정 연도를 지어내는 것보다 없는 게 낫다.
+`fiscal_year` 를 쓴다. 이 값도 문서 표에 같이 넣어 둔다.
 """
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+DOC_MAP_PATH = ROOT / "data" / "index" / "doc_fiscal_map.json"
+MASK_PATH = ROOT / "data" / "index" / "latest_mask.npz"
+MANIFEST_PATH = ROOT / "corpus" / "manifest.jsonl"
+OVERFLOW_LOG = ROOT / "reports" / "annotate_era_overflow.jsonl"
+MAP_STATS = ROOT / "reports" / "doc_fiscal_map.json"
+ERA_ROWS = ROOT / "reports" / "era_rows.npz"
 
 # '제17기', '제 8 기', '제 17 기' 를 모두 잡는다
 _ERA = re.compile(r"제\s*(\d{1,3})\s*기")
 # '(단위 : 천원)', '(단위: 백만원, %)'
 _UNIT = re.compile(r"\(\s*단위\s*[:：]\s*([^)]{1,20}?)\s*\)")
+# report_nm 의 '(2024.12)'
+_FY = re.compile(r"\((\d{4})[.\-/](\d{1,2})\)")
 _SEPARATE_STMT = ("재무상태표", "손익계산서", "현금흐름표", "자본변동표", "대차대조표")
 _CLOSE_TAG = re.compile(r"</\s*document\s*>", re.IGNORECASE)
 _WS = re.compile(r"\s+")
 
+# 문서의 '당기 기수' 를 어느 절에서 뽑는가. 측정 스크립트(sweep_era_error.py)와 같은 목록.
+FIN_SECTIONS = ("연결재무제표", "재무제표", "요약재무정보",
+                "재무상태표", "손익계산서", "현금흐름표")
+# 절 판정은 section_path 의 **1~2번 칸(장·절 제목)** 만 본다.
+# 측정 스크립트는 경로 전체를 이어붙여 봤는데, 그러면 각주 문구가 섞인다. 실제로
+# LG생활건강 'II. 사업의 내용 > 3. 원재료 및 생산설비' 의 각주가
+# "…'3. 연결재무제표 주석' 중 '16. 유형자산'을 참조" 라서 재무제표 절로 오인됐고,
+# 그 표의 '예상 투자액(제24기)'(내년 계획) 때문에 당기 기수가 1 커졌다.
+FIN_DEPTH = slice(1, 3)
+
 UNIT_SCAN = 400        # 본문 앞 몇 자에서 단위를 찾을지
 MAX_ERAS = 6           # 주석에 나열할 기수 상한
+MAX_OVERFLOW_LOG = 5000   # 한 프로세스에서 남길 로그 줄 상한
 REQUIRED = ("corp_name", "report_nm", "rcept_dt", "rcept_no")
 
 
@@ -68,10 +113,13 @@ def _section(src: dict) -> str:
     return " > ".join(segs)
 
 
+def _dash_date(d) -> str:
+    d = str(d or "")
+    return f"{d[:4]}-{d[4:6]}-{d[6:8]}" if len(d) == 8 and d.isdigit() else d
+
+
 def _source_label(src: dict) -> str:
-    d = str(src.get("rcept_dt") or "")
-    dt = f"{d[:4]}-{d[4:6]}-{d[6:8]}" if len(d) == 8 and d.isdigit() else d
-    return (f"[{src['corp_name']} {src['report_nm']}, {dt}, "
+    return (f"[{src['corp_name']} {src['report_nm']}, {_dash_date(src.get('rcept_dt'))}, "
             f"접수번호 {src['rcept_no']}]")
 
 
@@ -93,8 +141,117 @@ def _basis(section: str):
     return None
 
 
+def fiscal_year_of(report_nm: str) -> int:
+    """report_nm 의 '(2024.12)' 에서 사업연도. 없으면 -1."""
+    m = _FY.search(report_nm or "")
+    return int(m.group(1)) if m else -1
+
+
+# ---------------------------------------------------------------- 문서 -> 당기 기수 표
+
+
+class _DocFiscalMap:
+    """doc_fiscal_map.json 을 doc_id / rcept_no 두 갈래로 찾을 수 있게 감싼다.
+
+    검색 결과에는 doc_id 가 top-level 로 들어 있지만(hybrid._render), 단위 테스트처럼
+    doc_id 없이 만든 결과도 있어서 rcept_no 로도 찾을 수 있게 해 둔다.
+    같은 접수번호에 값이 어긋나는 항목이 둘 이상이면 그 접수번호는 **안 쓴다**(None).
+    """
+
+    def __init__(self, data: dict) -> None:
+        self.by_doc: dict[str, dict] = {}
+        self.by_rcept: dict[str, dict | None] = {}
+        for doc_id, e in (data or {}).items():
+            if not isinstance(e, dict) or "current_ki" not in e:
+                continue
+            self.by_doc[str(doc_id)] = e
+            rc = str(e.get("rcept_no") or "")
+            if not rc:
+                continue
+            prev = self.by_rcept.get(rc, "missing")
+            if prev == "missing":
+                self.by_rcept[rc] = e
+            elif prev is not None and (
+                    prev["current_ki"] != e["current_ki"]
+                    or prev["fiscal_year"] != e["fiscal_year"]):
+                self.by_rcept[rc] = None       # 충돌 — 지어내지 않고 포기한다
+
+    def __len__(self) -> int:
+        return len(self.by_doc)
+
+    def lookup(self, doc_id=None, rcept_no=None):
+        if doc_id:
+            e = self.by_doc.get(str(doc_id))
+            if e:
+                return e
+        if rcept_no:
+            return self.by_rcept.get(str(rcept_no))
+        return None
+
+
+_MAP = None
+_MAP_LOADED = False
+_MAP_WARNED = False
+
+
+def _doc_map():
+    """표를 한 번만 읽어 캐시한다. 없으면 None (예외 없음)."""
+    global _MAP, _MAP_LOADED, _MAP_WARNED
+    if not _MAP_LOADED:
+        _MAP_LOADED = True
+        try:
+            _MAP = _DocFiscalMap(json.loads(DOC_MAP_PATH.read_text(encoding="utf-8")))
+        except (OSError, ValueError) as e:
+            _MAP = None
+            if not _MAP_WARNED:
+                _MAP_WARNED = True
+                print(f"[context] {DOC_MAP_PATH} 를 읽지 못했다 — 기수 주석을 전부 생략한다. "
+                      f"({type(e).__name__}: {e}) "
+                      f"python -m src.agent.context --build 로 만든다", flush=True)
+    return _MAP
+
+
+def reset_caches() -> None:
+    """테스트용. 표와 계열 색인을 다시 읽게 만든다."""
+    global _MAP, _MAP_LOADED, _MAP_WARNED, _SERIES, _SERIES_LOADED, _OVERFLOW_N
+    _MAP = None
+    _MAP_LOADED = False
+    _MAP_WARNED = False
+    _SERIES = None
+    _SERIES_LOADED = False
+    _OVERFLOW_N = 0
+
+
+_OVERFLOW_N = 0
+
+
+def _log_overflow(res: dict, chunk_ki: int, entry: dict, why: str) -> None:
+    """예외를 삼키지 않는다(규칙 9). 주석을 생략한 이유를 파일에 남긴다."""
+    global _OVERFLOW_N
+    if _OVERFLOW_N >= MAX_OVERFLOW_LOG:
+        return
+    _OVERFLOW_N += 1
+    src = res.get("source") or {}
+    rec = {"why": why, "chunk_id": res.get("chunk_id"), "doc_id": res.get("doc_id"),
+           "rcept_no": src.get("rcept_no"), "corp_name": src.get("corp_name"),
+           "report_nm": src.get("report_nm"), "section": src.get("section"),
+           "chunk_max_ki": chunk_ki,
+           "doc_current_ki": entry.get("current_ki") if entry else None,
+           "doc_fiscal_year": entry.get("fiscal_year") if entry else None}
+    try:
+        OVERFLOW_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(OVERFLOW_LOG, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError as e:
+        print(f"[context] 주석 생략 로그를 쓰지 못했다: {type(e).__name__}: {e}", flush=True)
+
+
 def annotate(res: dict):
-    """자동 주석 한 줄. 기수 표기가 없거나 당기 연도를 모르면 None (예외 없음)."""
+    """자동 주석 한 줄. 근거가 모자라면 None (예외 없음).
+
+    기수 -> 연도 환산은 문서 표(`doc_fiscal_map.json`)의 당기 기수를 기준으로 한다.
+    표에 없는 문서는 주석을 통째로 생략한다 — 틀린 연도를 붙이는 것보다 없는 게 낫다.
+    """
     src = res.get("source") or {}
     text = res.get("text") or ""
     section = _section(src)
@@ -102,14 +259,31 @@ def annotate(res: dict):
     eras = sorted({int(m) for m in _ERA.findall(text)}, reverse=True)
     if not eras:
         return None
-    try:
-        fy = int(src.get("fiscal_year") or -1)
-    except (TypeError, ValueError):
-        fy = -1
-    if fy <= 0:
-        return None            # 접수 연도로 때우지 않는다
 
-    cur = eras[0]              # 최대 기수 = 당기 (결산월 12월 가정)
+    m = _doc_map()
+    entry = m.lookup(res.get("doc_id") or src.get("doc_id"), src.get("rcept_no")) if m else None
+    if entry is None:
+        return None                # 표에 없다 — 접수 연도로 때우지 않는다
+
+    cur = int(entry["current_ki"])
+    fy = int(entry["fiscal_year"])
+    if fy <= 0 or cur <= 0:
+        return None
+
+    # 표가 낡았는지 여기서 잡힌다. 검색 결과의 사업연도와 표의 사업연도가 다르면 못 믿는다.
+    try:
+        src_fy = int(src.get("fiscal_year") or -1)
+    except (TypeError, ValueError):
+        src_fy = -1
+    if src_fy > 0 and src_fy != fy:
+        _log_overflow(res, eras[0], entry, "fiscal_year 불일치")
+        return None
+
+    if eras[0] > cur:
+        # 문서의 당기보다 큰 기수가 본문에 있다. 환산 기준이 흔들리므로 생략하고 기록한다.
+        _log_overflow(res, eras[0], entry, "청크 기수 > 문서 당기 기수")
+        return None
+
     years = ", ".join(f"제{e}기={fy - (cur - e)}년" for e in eras[:MAX_ERAS])
 
     parts = [years]
@@ -119,9 +293,98 @@ def annotate(res: dict):
     basis = _basis(section)
     if basis:
         parts.append(basis)
-    if res.get("preserved"):
-        parts.append("정정 전 첨부본")
     return "※ 자동 주석(공시 원문 아님): " + " · ".join(parts)
+
+
+# ---------------------------------------------------------------- 정정 경고
+
+
+class _SeriesLatest:
+    """계열(series_code) -> 그 계열의 최신 접수번호·접수일.
+
+    latest_mask.npz 의 series_code 가 정본이다(= (회사, 접두 뗀 report_nm) 로 묶은 계열).
+    id_map 의 receipt_no 와 행이 1:1 이므로 둘을 겹쳐 계열별 최대 접수번호를 구하고,
+    접수일은 manifest 에서 가져온다.
+    """
+
+    def __init__(self) -> None:
+        import numpy as np
+        import pandas as pd
+
+        from src.index import paths
+
+        z = np.load(MASK_PATH)
+        series = z["series_code"]
+        rc = pd.read_parquet(paths.ID_MAP, columns=["receipt_no"])["receipt_no"]
+        rc = rc.astype(str).to_numpy()
+        if len(rc) != len(series):
+            raise ValueError(f"행 수 불일치: id_map {len(rc):,} vs latest_mask {len(series):,}")
+
+        df = pd.DataFrame({"rc": rc, "ser": series})
+        self.latest_of = {int(k): str(v) for k, v in df.groupby("ser")["rc"].max().items()}
+        self.series_of = dict(zip(df["rc"].tolist(), (int(x) for x in df["ser"].tolist())))
+
+        self.dt_of: dict[str, str] = {}
+        with open(MANIFEST_PATH, encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                d = json.loads(line)
+                self.dt_of[str(d.get("rcept_no"))] = str(d.get("rcept_dt") or "")
+
+    def latest_for(self, rcept_no: str):
+        """(최신 접수번호, 최신 접수일). 자기 자신이 최신이거나 모르면 None."""
+        ser = self.series_of.get(str(rcept_no))
+        if ser is None:
+            return None
+        latest = self.latest_of.get(ser)
+        if not latest or latest == str(rcept_no):
+            return None
+        return latest, self.dt_of.get(latest, "")
+
+
+_SERIES = None
+_SERIES_LOADED = False
+
+
+def _series_latest():
+    global _SERIES, _SERIES_LOADED
+    if not _SERIES_LOADED:
+        _SERIES_LOADED = True
+        try:
+            _SERIES = _SeriesLatest()
+        except (OSError, ValueError, ImportError, KeyError) as e:
+            _SERIES = None
+            print(f"[context] 정정본 계열 색인을 만들지 못했다 — 정정 경고에서 "
+                  f"정정본 접수정보를 뺀다. ({type(e).__name__}: {e})", flush=True)
+    return _SERIES
+
+
+def correction_note(res: dict):
+    """preserved(정정 전 자료) 청크에 붙는 경고 줄. 아니면 None.
+
+    검색 메타(`source.note`)에만 있던 경고를 프롬프트 본문으로 끌어올린 것이다.
+    메타는 LLM 이 보지 못한다.
+    """
+    if not res.get("preserved"):
+        return None
+    src = res.get("source") or {}
+    own = _dash_date(src.get("rcept_dt"))
+    head = f"※ 자동 주석(공시 원문 아님): 정정 전 자료(접수 {own})."
+
+    s = _series_latest()
+    later = s.latest_for(src.get("rcept_no")) if s else None
+    if later:
+        no, dt = later
+        tail = (f"이후 정정본(접수 {_dash_date(dt)}, 접수번호 {no})이 제출되었으므로 "
+                f"이 수치는 최종값이 아닐 수 있다")
+    else:
+        # 모르는 걸 지어내지 않는다. preserved 라는 사실 자체는 확실하다.
+        tail = "이후 정정본이 제출되었으므로 이 수치는 최종값이 아닐 수 있다"
+    return head + "\n  " + tail
+
+
+# ---------------------------------------------------------------- 조립
 
 
 def build_context(results) -> str:
@@ -146,6 +409,155 @@ def build_context(results) -> str:
         head = (f'<document id="{i}" '
                 f'source="{_attr(_source_label(src))}"\n'
                 f'          section="{_attr(_section(src))}">')
-        note = annotate(res)
-        blocks.append((note + "\n" if note else "") + head + "\n" + body + "\n</document>")
+        notes = [n for n in (correction_note(res), annotate(res)) if n]
+        prefix = "".join(n + "\n" for n in notes)
+        blocks.append(prefix + head + "\n" + body + "\n</document>")
     return "\n\n".join(blocks)
+
+
+# ---------------------------------------------------------------- 표 만들기 (--build)
+
+
+def build_doc_fiscal_map(out_path: Path = DOC_MAP_PATH, dump_rows: bool = False,
+                         verbose: bool = True) -> dict:
+    """정기보고서 문서마다 재무제표 절에서 당기 기수를 구해 표로 만든다.
+
+    계산 로직은 측정 스크립트(sweep_era_error.py)와 같다 —
+    **재무제표 계열 절에 나온 기수의 최댓값** 이 그 문서의 당기 기수다.
+
+    문서 하나가 doc_id 여럿으로 쪼개지는 경우가 있다(본문 + 첨부 감사보고서 등, 210건).
+    같은 접수번호면 같은 보고서이므로 접수번호 단위로 당기 기수를 모아 그 접수번호에
+    속한 doc_id 전부에 같은 값을 준다. 그래야 재무제표가 첨부 쪽에만 있는 문서의
+    본문 청크도 주석을 받는다.
+
+    이벤트 공시(major/exchange/holding)와 report_nm 에 '(YYYY.MM)' 이 없는 문서는
+    표에 넣지 않는다 — 사업연도를 모르는 채로 환산할 수는 없다.
+    """
+    import time
+    from collections import Counter, defaultdict
+
+    from src.search.source import iter_chunks_canonical
+
+    t0 = time.time()
+
+    man: dict[str, tuple[str, str]] = {}
+    with open(MANIFEST_PATH, encoding="utf-8") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            d = json.loads(line)
+            man[str(d.get("rcept_no"))] = (str(d.get("report_nm") or ""),
+                                           str(d.get("doc_group") or ""))
+
+    fin_ki: dict[str, int] = {}            # rcept_no -> 재무제표 절 최대 기수
+    docs_of: dict[str, set] = defaultdict(set)   # rcept_no -> {doc_id}
+    fy_of: dict[str, int] = {}             # rcept_no -> fiscal_year
+    cnt = Counter()
+    # 검증용 원자료 (--dump-rows)
+    rows_doc: list[str] = []
+    rows_rc: list[str] = []
+    rows_sec: list[str] = []
+    rows_max: list[int] = []
+    evid: list[tuple] = []                 # (rcept_no, 기수, 본문에 적힌 연도)
+    # '제 17 기 1분기 (2023년 3월말)' 처럼 기수 옆에 연도가 같이 적힌 자리 — 독립 대조용
+    ev_pat = re.compile(r"제\s*(\d{1,3})\s*기[^|\n]{0,24}?\(\s*(\d{4})년")
+
+    for n, rec in enumerate(iter_chunks_canonical(), 1):
+        rc = str(rec.get("receipt_no") or "")
+        meta = man.get(rc)
+        if meta is None:
+            cnt["manifest 결측"] += 1
+            continue
+        report_nm, doc_group = meta
+        sp = rec.get("section_path") or []
+        sec = " > ".join(sp)
+        fin_head = " > ".join(sp[FIN_DEPTH])
+        content = rec.get("content") or ""
+        eras = [int(x) for x in _ERA.findall(content)]
+        mx = max(eras) if eras else -1
+
+        if dump_rows:
+            rows_doc.append(str(rec.get("doc_id") or ""))
+            rows_rc.append(rc)
+            rows_sec.append(sec)
+            rows_max.append(mx)
+
+        if doc_group != "periodic":
+            cnt["이벤트 공시"] += 1
+            continue
+        fy = fiscal_year_of(report_nm)
+        if fy <= 0:
+            cnt["사업연도 없음"] += 1
+            continue
+        fy_of[rc] = fy
+        docs_of[rc].add(str(rec.get("doc_id") or ""))
+        if eras and any(k in fin_head for k in FIN_SECTIONS):
+            fin_ki[rc] = max(fin_ki.get(rc, 0), mx)
+            for a, b in ev_pat.findall(content):
+                evid.append((rc, int(a), int(b)))
+        if verbose and n % 100_000 == 0:
+            print(f"  {n:,}행 · 접수번호 {len(fy_of):,}건 · 당기 확정 {len(fin_ki):,}건 "
+                  f"({time.time() - t0:.0f}초)", flush=True)
+
+    out: dict[str, dict] = {}
+    for rc, ki in fin_ki.items():
+        for doc_id in docs_of.get(rc, ()):
+            out[doc_id] = {"current_ki": int(ki), "fiscal_year": int(fy_of[rc]),
+                           "rcept_no": rc}
+
+    no_fin = sorted(set(fy_of) - set(fin_ki))
+    stats = {
+        "n_periodic_receipts": len(fy_of),
+        "n_receipts_with_current_ki": len(fin_ki),
+        "n_receipts_without_fin_section": len(no_fin),
+        "n_doc_ids": len(out),
+        "receipts_without_fin_section": no_fin[:50],
+        "skipped": dict(cnt),
+        "seconds": round(time.time() - t0, 1),
+    }
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+    MAP_STATS.parent.mkdir(parents=True, exist_ok=True)
+    MAP_STATS.write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    if dump_rows:
+        import numpy as np
+
+        np.savez_compressed(
+            ERA_ROWS,
+            doc_id=np.asarray(rows_doc), rcept_no=np.asarray(rows_rc),
+            section=np.asarray(rows_sec), chunk_max_ki=np.asarray(rows_max, dtype=np.int16),
+            evid=np.asarray(evid, dtype=object) if evid else np.zeros((0, 3)),
+        )
+        stats["era_rows"] = str(ERA_ROWS)
+
+    if verbose:
+        for k, v in stats.items():
+            if k == "receipts_without_fin_section":
+                continue
+            print(f"  {k}: {v:,}" if isinstance(v, int) else f"  {k}: {v}")
+        print(f"[doc_fiscal_map] {out_path} 기록 — doc_id {len(out):,}건")
+    return stats
+
+
+def main() -> int:
+    import argparse
+    import sys
+
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    ap = argparse.ArgumentParser(description="문서별 당기 기수 표 만들기")
+    ap.add_argument("--build", action="store_true")
+    ap.add_argument("--dump-rows", action="store_true",
+                    help="검증용 원자료를 reports/era_rows.npz 에 함께 남긴다")
+    a = ap.parse_args()
+    if not a.build:
+        ap.print_help()
+        return 0
+    build_doc_fiscal_map(dump_rows=a.dump_rows)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
