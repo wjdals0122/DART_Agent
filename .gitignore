@@ -50,4 +50,5 @@ dist/
 prompt/
 
 # 질문 정리 목록
-Question/
+Question/'.env' 
+'.env' 
