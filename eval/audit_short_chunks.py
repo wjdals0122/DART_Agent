@@ -6,7 +6,7 @@
   OCI홀딩스  "가. 부문별 요약 재무현황 … 다음과 같습니다. (당기)"   ← 표 없음
   CJ제일제당 "가. 요약연결재무정보 (단위 : 천원)"                   ← 표 없음
 
-  python audit_short_chunks.py
+  python eval/audit_short_chunks.py
 """
 import json
 import re
@@ -15,9 +15,11 @@ import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
-ROOT = Path(r"c:\Users\oem\Desktop\private\Taeyun_Kwak\dis-044")
-sys.path.insert(0, str(ROOT))
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from src.search.source import iter_chunks_canonical  # noqa: E402
 
