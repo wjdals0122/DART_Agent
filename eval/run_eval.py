@@ -15,10 +15,20 @@
 
 【한 문서 상한(per_doc)을 왜 푸는가】
 검색기 기본값은 한 문서에서 2청크까지만 올린다(hybrid.PER_DOC=2).
-그런데 골든셋 문항은 접수일로 **문서를 하나로 좁혀 놓고** 그 안에서 정답을 찾는 형태다.
-상한 2가 그대로 걸리면 recall@20 이든 recall@50 이든 2청크에서 막힌다.
+결과를 한 문서가 독점하지 못하게 하려는 옳은 설계지만, 채점에서는 이게 걸리면
+"정답이 원래 상한에 막혀 안 보인 것" 을 검색 실패로 기록하게 된다.
 그래서 여기서는 상한을 푼다(--per-doc). 이 값이 다르면 숫자를 비교하면 안 되므로
 리포트 맨 위에 항상 찍는다.
+
+【필터는 회사명뿐이다】
+골든셋 문항(benchmark_*.json)은 문항별로 어느 문서인지 특정하지 않는다.
+그래서 접수일·사업연도를 안 준다. 회사 하나의 전체 공시에서 찾아야 하므로
+숫자가 낮게 나오는데, 그게 Agent 가 실제로 겪는 조건이다.
+
+【공시그룹은 사후 집계다】
+문항(benchmark_*.json)에는 공시그룹 정보가 없다. 그래서 라벨링에서 **사람이 고른 정답
+청크가 실제로 어느 공시에 있었는지**를 기록해 두고, 여기서는 그걸 그대로 집계한다.
+산문에서 추측해 붙인 값이 아니다.
 
 【정답이 top-20 밖인 문항】
 라벨링에서 'n' 으로 기록한 문항이다. gold_chunk_ids 가 비어 있다.
@@ -231,7 +241,10 @@ def main() -> int:
     lines += [""] + fmt(s, a.per_doc, a.top_k)
 
     if s["n_scored"]:
-        lines += section("공시그룹별", breakdown(s["scored"], lambda r: [r.get("doc_group", "?")]))
+        # 공시그룹은 문항이 아니라 **라벨링에서 사람이 고른 정답 청크**에서 온다.
+        # 정답이 두 공시에 걸쳐 있으면 양쪽에 다 센다(그래서 합이 문항 수보다 클 수 있다).
+        lines += section("공시그룹별", breakdown(
+            s["scored"], lambda r: r.get("doc_groups") or [r.get("doc_group") or "(미상)"]))
         lines += section("유형별", breakdown(s["scored"], lambda r: [r.get("answer_type", "?")]))
         lines += section("태그별", breakdown(s["scored"], lambda r: r.get("tags") or ["(태그없음)"]))
 

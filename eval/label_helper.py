@@ -1,29 +1,46 @@
 """골든셋 라벨링 도구 — 사람이 정답 청크를 고른다.
 
-**질문도 정답도 여기서 만들지 않는다.** 질문은 `bench_q_part*.json` 에 있는 것을 쓰고,
-정답 청크는 화면에 띄운 실제 검색 결과 중에서 사람이 번호로 고른다.
-자동으로 정답을 정하는 코드는 이 파일 어디에도 없다.
+**질문도 정답도 여기서 만들지 않는다.** 질문과 정답(`ground_truth`)은 사람이 만든
+`benchmark_*.json` 에 있는 것을 그대로 쓰고, 이 도구는 "그 정답이 실린 청크가 어느 것인가"
+만 사람에게 물어 받아 적는다. 자동으로 정답 청크를 정하는 코드는 이 파일 어디에도 없다.
 
   python eval/label_helper.py --sample          # 30문항 표본추출 -> eval/golden_todo.jsonl
   python eval/label_helper.py                   # 라벨링 시작(이어서 진행)
   python eval/label_helper.py --dry-run         # 첫 문항 화면만 띄우고 종료(기록 안 함)
   python eval/label_helper.py --show-queries    # 검색어 변환 전후 목록만 출력
 
-【왜 문항의 query 를 그대로 검색에 안 넣는가】
-문항은 "LG이노텍이 20250813에 접수한 반기보고서 (2025.06)을 기준으로, …" 처럼
-회사·날짜·보고서명을 문장 안에 품고 있다. 그건 이미 **하드필터로 주는 값**이다.
-질의 문자열에 또 넣으면 BM25 가 회사명·날짜 토큰에 점수를 몰아주고,
-정작 "무엇을 묻는지"(요약연결재무정보 영업이익)는 묻혀 버린다.
-그래서 필터로 줄 값은 빼고 물음의 알맹이만 남긴다. 규칙은 to_search_query() 에 있다.
+【왜 benchmark_*.json 인가 — bench_q_part*.json 이 아니라】
+둘 다 Question/ 아래에 있다.
 
-변환은 어디까지나 기계 규칙이라 틀릴 수 있다. 그래서 화면에 **변환 전후를 같이** 띄우고,
-'e' 로 사람이 검색어를 직접 고쳐 재검색할 수 있게 했다.
+  bench_q_part*.json   기계 생성 318문항 · 회사 15개 · **정답 없음** ·
+                       회사/그룹/유형/접수일이 필드로 들어 있다
+  benchmark_*.json     사람이 쓴 252문항 · 회사 40개 · **정답 있음(ground_truth)** ·
+                       문서 정보는 doc_info 산문 한 줄뿐
+
+benchmark 쪽을 쓴다. 이유는 셋이다.
+  1. 회사가 40개라 "30문항 전부 서로 다른 회사" 가 실제로 가능하다(15개로는 불가능했다)
+  2. 금융·보험+엔터 회사가 7곳이다(15개 풀에는 KB금융·JYP Ent 둘뿐이었다)
+  3. **ground_truth 에 정답 숫자가 적혀 있어서** 그 숫자로 원문을 직접 grep 할 수 있다.
+     검색기가 top-20 에 못 올린 정답을 사람이 눈으로 확인할 수 있다는 뜻이고,
+     그래야 'not_in_top20' 을 정확히 기록해 recall 이 부풀려지지 않는다
+
+【대신 포기한 것 — 접수일 필터】
+benchmark_*.json 의 doc_info 는 **파일 단위 산문**이다.
+"…사업보고서(2026.03.20 접수, 20260320001088) 및 투자판단관련주요경영사항 4건(…)"
+처럼 문서를 여러 개 가리키는 파일이 42개 중 22개다. 어느 질문이 어느 문서 건지는
+파일에 안 적혀 있다. 산문에서 추측해 붙이면 그게 바로 데이터를 지어내는 짓이다.
+
+그래서 **회사 필터만** 건다. 접수일을 안 주므로 검색이 더 어려워지고 recall 은 낮게 나온다.
+그게 9/3 Agent 가 실제로 겪는 조건이다 — Agent 도 접수일을 미리 못 받는다.
+
+공시그룹(periodic/exchange/major/holding) 배분도 미리 못 맞춘다. 대신 **사람이 고른
+정답 청크가 실제로 어느 공시에 있었는지**를 기록해 사후 집계한다. 지어내는 값이 없다.
 """
 from __future__ import annotations
 
 import argparse
 import csv
-import glob
+import hashlib
 import json
 import random
 import re
@@ -46,10 +63,10 @@ TODO = EVAL / "golden_todo.jsonl"
 GOLDEN = EVAL / "golden.jsonl"
 UNIVERSE = ROOT / "corpus" / "universe.csv"
 
-# bench_q_part*.json 을 찾을 곳. eval/ 을 먼저 보고, 없으면 Question/ 아래를 뒤진다.
-BENCH_GLOBS = ("eval/bench_q_part*.json",
-               "Question/**/bench_q_part*.json",
-               "bench_q_part*.json")
+# benchmark_*.json 을 찾을 곳. eval/ 을 먼저 보고, 없으면 Question/ 아래를 뒤진다.
+BENCH_GLOBS = ("eval/benchmark_*.json",
+               "Question/**/benchmark_*.json",
+               "benchmark_*.json")
 
 # 검색기 책임 밖인 유형은 후보에서 뺀다.
 # multi_open·complex_* 는 여러 문서를 읽고 계산·서술하는 문제라 '정답 청크' 가 하나로
@@ -57,21 +74,25 @@ BENCH_GLOBS = ("eval/bench_q_part*.json",
 KEEP_TYPES = ("search_closed", "search_open", "multi_closed")
 
 SEED = 20260904                      # 재현용 고정 시드
-N_TRIALS = 4000                      # 배분 탐색 재시도 횟수
+N_TRIALS = 3000
 N_SAMPLE = 30
 
-QUOTA_GROUP = {"periodic": 12, "exchange": 8, "major": 5, "holding": 5}
 QUOTA_TYPE = {"search_closed": 12, "search_open": 10, "multi_closed": 8}
 FOCUS_SECTORS = ("금융·보험", "엔터테인먼트")   # '금융·보험·엔터'
 FOCUS_MIN = 5
+MAX_PER_CORP = 1                     # 30문항 전부 서로 다른 회사
 
 TOP_K = 20
-# 검색기 기본값은 한 문서에서 2청크까지만 올린다(PER_DOC=2). 결과를 한 문서가
-# 독점하지 못하게 하려는 것인데, 여기서는 **접수일로 문서를 하나로 좁혀 놓고**
-# 그 안에서 정답 청크를 고르는 상황이라 그 상한이 그대로 걸리면 후보가 2~6개뿐이다.
-# 라벨링에서는 상한을 풀어 top-20 을 실제로 채운다.
+# 검색기 기본값은 한 문서에서 2청크까지만 올린다(hybrid.PER_DOC=2). 결과를 한 문서가
+# 독점하지 못하게 하려는 것인데, 라벨링에서는 그 상한이 걸리면 top-20 을 보여준다고
+# 해놓고 실제로는 몇 개만 보여주게 된다. 여기서는 푼다.
 PREVIEW = 200                        # content 미리보기 글자 수
+GREP_MAX_HITS = 12                   # grep 결과를 몇 개까지 찍을지
 BAR = "─" * 78
+
+_RCEPT = re.compile(r"\b(\d{14})\b")
+_NUMBER = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d{4,}(?:\.\d+)?")
+_WS = re.compile(r"\s+")
 
 
 # ---------------------------------------------------------------- 문항 읽기
@@ -85,29 +106,56 @@ def find_bench_files() -> list[Path]:
     return []
 
 
-def load_bench() -> tuple[list[dict], list[Path]]:
+def load_bench() -> tuple[list[dict], list[Path], dict]:
+    """benchmark_*.json 을 읽어 (문항, 파일목록, 건너뛴 파일) 을 돌려준다.
+
+    - `scenarios` 가 없는 파일은 문항 파일이 아니다(benchmark_master_templates_24.json).
+    - 내용이 완전히 같은 중복본이 있다(…_2024AR(1).json). 해시로 걸러낸다.
+    """
     files = find_bench_files()
     if not files:
         raise SystemExit(
-            "bench_q_part*.json 을 찾지 못했다. 찾아본 곳: "
-            + ", ".join(BENCH_GLOBS) + "\n문항 파일이 없으면 아무것도 만들 수 없다. 중단한다.")
+            "benchmark_*.json 을 찾지 못했다. 찾아본 곳: " + ", ".join(BENCH_GLOBS)
+            + "\n문항 파일이 없으면 아무것도 만들 수 없다. 중단한다.")
+
     rows: list[dict] = []
+    used: list[Path] = []
+    skipped: dict = {"scenarios 없음": [], "내용 중복": []}
+    seen_hash: dict[str, str] = {}
     for f in files:
         data = json.loads(f.read_text(encoding="utf-8"))
-        if not isinstance(data, list):
-            raise SystemExit(f"{f} 가 리스트가 아니다({type(data).__name__}). 중단한다")
-        for r in data:
-            missing = [k for k in ("id", "corp", "grp", "type", "query", "rcept_dt")
-                       if not r.get(k)]
-            if missing:
-                raise SystemExit(f"{f} 의 문항 {r.get('id')} 에 {missing} 가 없다. "
-                                 f"기본값으로 채우지 않고 중단한다")
-            r["_file"] = f.name
-            rows.append(r)
+        if not isinstance(data, dict) or "scenarios" not in data:
+            skipped["scenarios 없음"].append(f.name)
+            continue
+        h = hashlib.md5(json.dumps(data, ensure_ascii=False,
+                                   sort_keys=True).encode()).hexdigest()
+        if h in seen_hash:
+            skipped["내용 중복"].append(f"{f.name} (= {seen_hash[h]})")
+            continue
+        seen_hash[h] = f.name
+
+        corp = data.get("company")
+        if not corp:
+            raise SystemExit(f"{f.name} 에 company 가 없다. 기본값으로 채우지 않고 중단한다")
+        doc_info = data.get("doc_info") or ""
+        for typ, sc in data["scenarios"].items():
+            if not isinstance(sc, dict) or not sc.get("query"):
+                raise SystemExit(f"{f.name} 의 {typ} 에 query 가 없다. 중단한다")
+            if not sc.get("ground_truth"):
+                raise SystemExit(f"{f.name} 의 {typ} 에 ground_truth 가 없다. 중단한다")
+            rows.append({
+                "id": f"{corp}__{typ}", "corp": corp, "type": typ,
+                "query": sc["query"], "ground_truth": sc["ground_truth"],
+                "doc_info": doc_info,
+                "rcept_nos": sorted(set(_RCEPT.findall(doc_info))),
+                "_file": f.name,
+            })
+        used.append(f)
+
     dup = [k for k, v in Counter(r["id"] for r in rows).items() if v > 1]
     if dup:
         raise SystemExit(f"문항 id 중복 {len(dup)}건: {dup[:5]}")
-    return rows, files
+    return rows, used, skipped
 
 
 def load_sectors() -> dict[str, str]:
@@ -118,61 +166,46 @@ def load_sectors() -> dict[str, str]:
 
 
 # ---------------------------------------------------------------- 검색어 변환
-#
-# 규칙 순서가 중요하다. 긴 덩어리(가상 경쟁사 절, 보고서명)를 먼저 지우고,
-# 그 다음에 짧은 조각(날짜, 회사명)을 지운다. 반대로 하면 덩어리가 안 잡힌다.
 
-# (1) 가상의 비교 대상 절 — multi_closed 에만 나온다. "가상의 경쟁사 '대한이엔씨'와
-#     비교해서…" 는 코퍼스에 없는 내용이라, 남겨두면 없는 회사를 찾아 헤맨다.
-#     쉼표로 끊어 '가상' 이 든 마디를 통째로 버린다. 숫자 안의 쉼표(2,000)로는 안 끊는다.
+# 사람이 쓴 질문이라 기계 생성 문항 같은 정형 껍데기가 없다. 그래도 회사명·연도·지시문은
+# 똑같이 걷어낸다. 회사명은 필터로 따로 주므로 질의에 남으면 BM25 점수만 흐린다.
+_YM = re.compile(r"20\d{2}\s*년(?:\s*\d{1,2}\s*월)?(?:\s*기준|말)?")
+_BOILER = [
+    r"각각\s*제시하시오", r"제시하시오", r"서술하시오", r"산출하시오", r"계산하시오",
+    r"설명하시오", r"작성하시오", r"정리해서\s*알려줘", r"알려줄래\??", r"알려줘",
+    r"정리해줄래\??", r"정리해줘", r"뽑아줘", r"봐줄래\??", r"풀어줘", r"해봐라",
+    r"단위와\s*함께", r"같이\s*알려줘", r"함께\s*밝히", r"개조식으로", r"알기\s*쉽게",
+    r"근거하여", r"근거로", r"기준으로", r"관련해서", r"관련하여", r"좀\s*",
+]
+_BOILER_RE = re.compile("|".join(_BOILER))
+_PAREN = re.compile(r"[「」『』（）()\[\]{}<>《》〈〉]")
+
+# 가상의 비교 대상이 든 마디는 통째로 버린다. 후보 126문항 중 40문항에 나온다.
+# "동종업계 가상 경쟁사 '스타라이즈엔터'가 …" 는 코퍼스에 없는 내용이라
+# 남겨두면 없는 회사와 없는 숫자를 찾아 헤맨다.
+# 쉼표로 끊되 숫자 안의 쉼표(280,000,000)로는 안 끊는다.
 _SEG = re.compile(r"(?<!\d)[,、](?!\d)")
 
 
 def drop_hypothetical(text: str) -> str:
-    segs = _SEG.split(text)
-    kept = [g for g in segs if "가상" not in g]
+    kept = [g for g in _SEG.split(text) if "가상" not in g]
     return ", ".join(kept) if kept else text
 
-# (2) 날짜 + 접수/공시 동사
-_DATE_ACT = re.compile(
-    r"\d{8}\s*(?:자로|자|에|일에|일자로)?\s*"
-    r"(?:접수(?:된|한)?|공시(?:된|한)?|제출(?:된|한)?|올린|낸|제출)?")
-_YM = re.compile(r"20\d{2}\s*년(?:\s*\d{1,2}\s*월)?(?:\s*기준)?")
-
-# (3) 질문 껍데기. 물음의 알맹이가 아니라 지시문이다.
-_BOILER = [
-    r"을\s*기준으로", r"를\s*기준으로", r"에\s*근거하여", r"을\s*근거로", r"를\s*근거로",
-    r"공시\s*본문에\s*근거하여", r"관련해서", r"관련하여", r"에\s*나온", r"에\s*나와\s*있는",
-    r"각각\s*제시하시오", r"제시하시오", r"서술하시오", r"산출하시오", r"계산하시오",
-    r"검산하시오", r"작성하시오", r"정리해서\s*알려줘", r"알려줄래\??", r"알려줘",
-    r"정리해줄래\??", r"정리해줘", r"뽑아줘", r"봐줄래\??", r"풀어줘", r"해봐라", r"하라",
-    r"함께\s*계산하라", r"단위와\s*함께", r"숫자만\s*딱\s*집어서", r"개조식으로",
-    r"알기\s*쉽게", r"쉽게", r"좀\s*", r"직접\s*계산", r"직접\s*검산", r"검산해봐라",
-    r"포함할\s*것", r"함께\s*밝히", r"몇\s*퍼센트로\s*적혀\s*있어\??", r"적혀\s*있어\??",
-    r"얼마인지", r"몇\s*%p", r"%p로", r"어느\s*쪽이\s*얼마나\s*큰지",
-]
-_BOILER_RE = re.compile("|".join(_BOILER))
-
-# (4) 남은 토큰 중 버릴 일반 어휘. 어느 문항에나 나와서 변별력이 없다.
 STOPWORDS = {
     "기준", "금액", "단위", "각각", "숫자", "정확", "얼마", "퍼센트", "내용", "관련",
-    "제시", "서술", "산출", "계산", "검산", "정리", "비교", "격차", "차액", "배수",
-    "기록", "가상", "경쟁사", "동종업계", "기관투자자",
-    "직전", "이번", "회사", "공시", "보고서", "제출", "접수", "다음",
-    "포함", "여부", "일치", "가지", "부분", "사항", "문서",
-    # '해당하는지', '이용해', '차지하는', '기재 비율' 처럼 질문 문장을 잇는 말
-    "해당", "이용", "차지", "기재",
-    "년", "월", "일", "것", "수", "때", "등", "및", "좀", "안", "위", "중",
+    "제시", "서술", "산출", "계산", "검산", "정리", "설명", "기록",
+    "회사", "공시", "보고서", "제출", "접수", "다음", "포함", "여부", "일치",
+    "가지", "부분", "사항", "문서", "해당", "이용", "차지", "기재",
+    "확인", "동종", "업계", "경쟁사", "가상", "비교", "견주", "차액", "각각",
+    # '~를 작성해줘', '브리핑해줘', '요즘', '구체적으로' — 지시문에서 오는 말
+    "작성", "브리핑", "요즘", "구체",
+    "년", "월", "일", "것", "수", "때", "등", "및", "좀", "안", "위", "중", "전체",
 }
-
 # 명사만 남긴다. 동사·형용사 어간은 질문 껍데기에서 오는 게 대부분이다.
 _NOUN_TAGS = {"NNG", "NNP", "SL", "SH", "SN"}
-_WS = re.compile(r"\s+")
-_PAREN = re.compile(r"[「」『』（）()\[\]{}<>《》〈〉]")
 
 
 def _strip_company(text: str, corp: str) -> str:
-    """회사명과 그 변형을 지운다. 별칭 사전이 있으면 같이 쓴다."""
     forms = {corp, _WS.sub("", corp)}
     try:
         from src.search.aliases import resolve_company
@@ -191,44 +224,29 @@ def _strip_company(text: str, corp: str) -> str:
 
 
 def to_search_query(rec: dict) -> str:
-    """문항 문장 -> 검색어. 필터로 줄 값(회사·날짜·보고서명)과 지시문을 걷어낸다.
+    """질문 문장 -> 검색어.
 
-    순서:
-      1. 가상의 비교 대상이 든 마디 삭제 (multi_closed)
-      2. 보고서명 삭제 — 이미 rcept_dt 필터로 문서를 특정한다
-      3. 날짜 + 접수/공시 동사, 연·월 표현 삭제
-      4. 회사명(별칭 포함) 삭제
-      5. 질문 껍데기(지시문) 삭제
-      6. Kiwi 로 명사만 추출 -> 불용어 제거 -> 중복 제거 -> 앞에서 8개
+      1. 가상의 비교 대상이 든 마디 삭제 (multi_closed 에 많다)
+      2. 회사명(별칭 포함) 삭제 — 필터로 따로 준다
+      3. 연·월 표현, 질문 껍데기(지시문) 삭제
+      4. Kiwi 로 명사만 추출 -> 불용어 제거 -> 중복 제거 -> 앞에서 8개
+
+    규칙이 전부 걷어내 버리면 원문을 그대로 쓴다. 빈 검색어는 넘기지 않는다.
     """
-    t = rec.get("query") or ""
-    t = drop_hypothetical(t)
-
-    rn = rec.get("report_nm") or ""
-    if rn:
-        t = t.replace(rn, " ")
-        base = re.sub(r"\s*\(.*?\)\s*", "", rn).strip()      # '사업보고서 (2025.12)' -> '사업보고서'
-        if len(base) >= 3:
-            t = t.replace(base, " ")
-
-    t = _DATE_ACT.sub(" ", t)
-    t = _YM.sub(" ", t)
+    t = drop_hypothetical(rec.get("query") or "")
     t = _strip_company(t, rec.get("corp") or "")
+    t = _YM.sub(" ", t)
     t = _BOILER_RE.sub(" ", t)
     t = _PAREN.sub(" ", t)
 
-    toks = _nouns(t)
     out, seen = [], set()
-    for w in toks:
-        if w in STOPWORDS or len(w) < 2 or w.isdigit():
-            continue
-        if w in seen:
+    for w in _nouns(t):
+        if w in STOPWORDS or len(w) < 2 or w.isdigit() or w in seen:
             continue
         seen.add(w)
         out.append(w)
         if len(out) >= 8:
             break
-    # 규칙이 전부 걷어내 버린 경우엔 원문을 그대로 쓴다. 빈 검색어를 넘기지 않는다.
     return " ".join(out) if out else _WS.sub(" ", (rec.get("query") or "")).strip()
 
 
@@ -248,35 +266,25 @@ def _nouns(text: str) -> list[str]:
 # ---------------------------------------------------------------- 표본추출
 
 
-def _cell_plan(rng, cap_of):
-    """(공시그룹, 유형) 칸마다 몇 문항을 뽑을지 정한다.
-
-    행 합 = QUOTA_GROUP, 열 합 = QUOTA_TYPE 인 표를 만든다. 칸의 상한은
-    **그 (그룹,유형) 문항을 가진 회사 수**다 — 한 회사가 같은 칸에서 두 문항을 낼 일은
-    없기 때문이다(문항 생성기가 회사·그룹·유형마다 하나씩 만들었다).
-    무작위로 한 칸씩 채우다 막히면 실패를 돌려주고, 부르는 쪽이 다시 시도한다.
-    """
-    need_g = dict(QUOTA_GROUP)
-    need_t = dict(QUOTA_TYPE)
+def _plan(rng, cap_of):
+    """유형마다 몇 문항을 뽑을지. 칸 상한은 그 유형 문항을 가진 회사 수다."""
+    need = dict(QUOTA_TYPE)
     plan = Counter()
     for _ in range(N_SAMPLE):
-        opts = [(g, t) for g in need_g for t in need_t
-                if need_g[g] > 0 and need_t[t] > 0 and plan[(g, t)] < cap_of.get((g, t), 0)]
+        opts = [t for t in need if need[t] > 0 and plan[t] < cap_of.get(t, 0)]
         if not opts:
             return None
-        g, t = rng.choice(opts)
-        plan[(g, t)] += 1
-        need_g[g] -= 1
-        need_t[t] -= 1
+        t = rng.choice(opts)
+        plan[t] += 1
+        need[t] -= 1
     return plan
 
 
 def _assign(plan, by_cell, caps, rng):
-    """칸마다 필요한 만큼 **서로 다른 회사**를 고른다. 회사별 상한은 caps 로 준다.
+    """유형별로 필요한 만큼 **서로 다른 회사**를 고른다. 회사별 상한은 caps.
 
-    최대유량으로 푼다.  source → 칸(용량 plan) → 회사(용량 1) → sink(용량 caps[회사])
-    칸→회사 용량이 1이라 **같은 칸에서 같은 회사가 두 번 뽑히는 일이 없다.**
-    (앞서 이분매칭으로 짰을 때 실제로 HMM 문항 하나가 두 번 뽑혔다.)
+    최대유량으로 푼다.  source → 유형(용량 plan) → 회사(용량 1) → sink(용량 caps[회사])
+    유형→회사 용량이 1이라 같은 유형에서 같은 회사가 두 번 뽑히지 않는다.
     탐욕이 아니라 되물러 가며 찾으므로, 가능한 배분이 있으면 찾아낸다.
     """
     cells = list(plan)
@@ -332,63 +340,49 @@ def _assign(plan, by_cell, caps, rng):
 
 
 def _penalty(pick, sectors) -> tuple:
-    g = Counter(r["grp"] for r in pick)
     ty = Counter(r["type"] for r in pick)
     per = Counter(r["corp"] for r in pick)
     focus = sum(1 for r in pick if sectors.get(r["corp"], "") in FOCUS_SECTORS)
-    dev_g = sum(abs(g[k] - v) for k, v in QUOTA_GROUP.items())
     dev_t = sum(abs(ty[k] - v) for k, v in QUOTA_TYPE.items())
-    # 회사 쏠림은 '최대 몇 번' 보다 '2회를 넘긴 총합' 으로 잰다.
-    # 한 회사만 3문항인 것과 여러 회사가 3문항인 것을 구별해야 한다.
-    excess = sum(max(0, v - 2) for v in per.values())
-    return (N_SAMPLE - len(pick),                  # 30개를 못 채우면 최악
-            dev_g, dev_t,
-            max(0, FOCUS_MIN - focus),             # 금융·엔터 부족분
-            excess,
-            -len(per))                             # 서로 다른 회사 수는 많을수록 좋다
+    return (N_SAMPLE - len(pick), dev_t,
+            max(0, FOCUS_MIN - focus),
+            sum(max(0, v - MAX_PER_CORP) for v in per.values()),
+            -len(per))
 
 
 def sample(cands, sectors, seed=SEED, trials=N_TRIALS):
-    """고정 시드로 재현 가능한 표본. 배분을 정확히 못 맞추면 가장 가까운 것을 고른다.
-
-    회사 수 상한(cap)을 2부터 올려 가며 찾는다. 회사가 적어 30문항을 서로 다른 회사로
-    채울 수 없으면 cap 이 올라가고, 그 사실은 보고에 그대로 남는다.
-    """
+    """고정 시드로 재현 가능한 표본. 조건을 정확히 못 맞추면 가장 가까운 것을 고른다."""
     rng = random.Random(seed)
     idx: dict = {}
     for r in cands:
-        idx.setdefault((r["grp"], r["type"]), {}).setdefault(r["corp"], r)
+        idx.setdefault(r["type"], {}).setdefault(r["corp"], r)
     by_cell = {k: sorted(v) for k, v in idx.items()}
     cap_of = {k: len(v) for k, v in by_cell.items()}
-
     corps = sorted({r["corp"] for r in cands})
     focus = [c for c in corps if sectors.get(c, "") in FOCUS_SECTORS]
 
-    # 상한을 조금씩만 푼다. 무작정 3으로 올리면 아무 회사나 3문항이 되는데,
-    # 실제로 3문항이 필요한 곳은 '금융·보험 + 엔터 5문항 이상' 을 맞춰야 하는
-    # 업종뿐이다(후보 풀에 그 업종 회사가 2곳밖에 없다).
-    ladders = [{c: 2 for c in corps}]
-    if focus:
-        ladders.append({c: (3 if c in focus else 2) for c in corps})
-    for n in (3, 4, 5, N_SAMPLE):
-        ladders.append({c: n for c in corps})
+    # 금융·엔터 문항이 모자라는 일이 없게, 먼저 그 회사들만으로 FOCUS_MIN 을 채운 해를
+    # 찾아본다. 실패하면 상한만 걸고 무작위 재시도에 맡긴다.
+    ladders = []
+    if len(focus) >= FOCUS_MIN:
+        ladders.append({c: (MAX_PER_CORP if c in focus else 0) for c in corps})
+    ladders.append({c: MAX_PER_CORP for c in corps})
 
     best = None
-    for caps in ladders:
-        for _ in range(max(1, trials // 4)):
-            plan = _cell_plan(rng, cap_of)
-            if plan is None:
-                continue
-            got = _assign(plan, by_cell, caps, rng)
-            if got is None:
-                continue
-            pick = [idx[cell][corp] for cell, corp in got]
-            if len({r["id"] for r in pick}) != len(pick):
-                continue                          # 같은 문항이 두 번 들어오면 버린다
-            p = _penalty(pick, sectors)
-            if best is None or p < best[0]:
-                best = (p, pick)
-        if best is not None and best[0][:4] == (0, 0, 0, 0):
+    for _ in range(trials):
+        plan = _plan(rng, cap_of)
+        if plan is None:
+            continue
+        got = _assign(plan, by_cell, ladders[-1], rng)
+        if got is None:
+            continue
+        pick = [idx[cell][corp] for cell, corp in got]
+        if len({r["id"] for r in pick}) != len(pick):
+            continue
+        p = _penalty(pick, sectors)
+        if best is None or p < best[0]:
+            best = (p, pick)
+        if p[:3] == (0, 0, 0):
             break
     if best is None:
         raise SystemExit("배분 조건을 만족하는 표본을 못 찾았다. 문항 수가 모자란다")
@@ -396,7 +390,7 @@ def sample(cands, sectors, seed=SEED, trials=N_TRIALS):
 
 
 def build_todo(seed=SEED) -> dict:
-    rows, files = load_bench()
+    rows, files, skipped = load_bench()
     sectors = load_sectors()
     cands = [r for r in rows if r["type"] in KEEP_TYPES]
     unknown = sorted({r["corp"] for r in cands if r["corp"] not in sectors})
@@ -404,53 +398,52 @@ def build_todo(seed=SEED) -> dict:
         print(f"[경고] universe.csv 에 없는 회사 {len(unknown)}개: {unknown}", file=sys.stderr)
 
     pick = sample(cands, sectors, seed)
-    pick.sort(key=lambda r: (r["grp"], r["type"], r["corp"]))
+    pick.sort(key=lambda r: (r["type"], r["corp"]))
 
     with open(TODO, "w", encoding="utf-8") as fh:
         for i, r in enumerate(pick, 1):
             fh.write(json.dumps({
-                "n": i, "qid": r["id"], "corp": r["corp"], "code": r.get("code"),
-                "grp": r["grp"], "type": r["type"], "report_nm": r.get("report_nm"),
-                "rcept_dt": r["rcept_dt"], "sector": sectors.get(r["corp"], ""),
-                "question": r["query"], "search_query": to_search_query(r),
-                "src_file": r["_file"],
+                "n": i, "qid": r["id"], "corp": r["corp"], "type": r["type"],
+                "sector": sectors.get(r["corp"], ""),
+                "question": r["query"], "ground_truth": r["ground_truth"],
+                "doc_info": r["doc_info"], "rcept_nos": r["rcept_nos"],
+                "search_query": to_search_query(r), "src_file": r["_file"],
             }, ensure_ascii=False) + "\n")
 
-    g = Counter(r["grp"] for r in pick)
     ty = Counter(r["type"] for r in pick)
     per = Counter(r["corp"] for r in pick)
     sec = Counter(sectors.get(r["corp"], "?") for r in pick)
-    stats = {
+    return {
         "seed": seed, "trials": N_TRIALS,
-        "files": [f.name for f in files],
+        "n_files": len(files), "skipped": skipped,
         "n_all": len(rows), "n_candidates": len(cands), "n_sampled": len(pick),
         "n_companies_in_pool": len({r["corp"] for r in cands}),
-        "group": {k: [g.get(k, 0), v] for k, v in QUOTA_GROUP.items()},
         "type": {k: [ty.get(k, 0), v] for k, v in QUOTA_TYPE.items()},
         "n_companies": len(per), "max_per_company": max(per.values()),
-        "over_twice": sum(max(0, v - 2) for v in per.values()),
-        "repeated": {k: v for k, v in per.items() if v > 2},
         "focus_sector_count": sum(v for k, v in sec.items() if k in FOCUS_SECTORS),
         "sectors": dict(sec.most_common()),
-        "per_company": dict(per.most_common()),
+        "n_with_rcept_hint": sum(1 for r in pick if r["rcept_nos"]),
     }
-    return stats
 
 
 def print_sample_stats(st: dict) -> None:
     print(f"\n표본 시드 = {st['seed']}  (재현하려면 --seed {st['seed']})")
-    print(f"문항 파일 {len(st['files'])}개 · 전체 {st['n_all']}문항 → "
+    print(f"문항 파일 {st['n_files']}개 · 전체 {st['n_all']}문항 → "
           f"후보 {st['n_candidates']}문항({'/'.join(KEEP_TYPES)}) → 표본 {st['n_sampled']}문항")
-    print(f"\n{'공시그룹':<12}{'실제':>6}{'목표':>6}   {'유형':<16}{'실제':>6}{'목표':>6}")
-    gk, tk = list(st["group"].items()), list(st["type"].items())
-    for i in range(max(len(gk), len(tk))):
-        a = f"{gk[i][0]:<12}{gk[i][1][0]:>6}{gk[i][1][1]:>6}" if i < len(gk) else " " * 24
-        b = (f"   {tk[i][0]:<16}{tk[i][1][0]:>6}{tk[i][1][1]:>6}") if i < len(tk) else ""
-        print(a + b)
-    print(f"\n서로 다른 회사 {st['n_companies']}개 (후보 풀에 {st['n_companies_in_pool']}개 "
-          f"· 한 회사 최대 {st['max_per_company']}문항)")
+    for why, names in st["skipped"].items():
+        if names:
+            print(f"  건너뜀({why}) {len(names)}개: {', '.join(names)}")
+    print(f"\n{'유형':<16}{'실제':>6}{'목표':>6}")
+    for k, (a, b) in st["type"].items():
+        print(f"{k:<16}{a:>6}{b:>6}")
+    print(f"\n서로 다른 회사 {st['n_companies']}개 / 표본 {st['n_sampled']}문항 "
+          f"(후보 풀에 {st['n_companies_in_pool']}개 · 한 회사 최대 {st['max_per_company']}문항)")
     print(f"금융·보험 + 엔터테인먼트 문항 {st['focus_sector_count']}개 (목표 {FOCUS_MIN}개 이상)")
+    print(f"doc_info 에 접수번호가 적힌 문항 {st['n_with_rcept_hint']}개 "
+          f"(필터로는 안 쓴다 — grep 범위를 좁힐 때만 참고)")
     print("\n업종별: " + " · ".join(f"{k} {v}" for k, v in st["sectors"].items()))
+    print("\n공시그룹 배분은 미리 못 맞춘다(문항에 그 정보가 없다). "
+          "라벨링이 끝나면 정답 청크의 실제 공시그룹으로 사후 집계한다.")
 
 
 # ---------------------------------------------------------------- 라벨링 화면
@@ -483,7 +476,8 @@ def show_hits(res: dict) -> list:
         d = h.get("score_detail") or {}
         body = _WS.sub(" ", (h.get("text") or ""))[:PREVIEW]
         print(f"[{i:>2}] vec={d.get('vec'):<9} bm25={d.get('bm25'):<10} "
-              f"{'※정정전' if h.get('preserved') else ''}")
+              f"{src.get('doc_group')} · {src.get('report_nm')} · {src.get('rcept_no')}"
+              f"{'  ※정정전' if h.get('preserved') else ''}")
         print(f"     § {src.get('section')}")
         print(f"     {body}")
     if not hits:
@@ -492,51 +486,60 @@ def show_hits(res: dict) -> list:
     return hits
 
 
-def grep_doc(rt, rcept_no: str, needle: str) -> None:
-    """검색기를 거치지 않고 문서 안 원문을 직접 훑는다.
+def grep_company(rt, stock_code, needles, rcept_hint=()) -> None:
+    """검색기를 거치지 않고 그 회사의 원문을 직접 훑는다.
 
-    이게 없으면 '검색기가 top-20 안에 넣어준 것' 중에서만 정답을 고르게 되고,
-    그러면 recall 이 실제보다 높게 나온다. 정답이 코퍼스에 있는데 검색기가 못 찾은
-    경우를 'not_in_top20' 으로 정확히 기록하려면 원문을 직접 볼 수 있어야 한다.
+    이게 없으면 '검색기가 top-20 에 올려준 것' 중에서만 정답을 고르게 되고,
+    정답이 코퍼스에 있는데 못 찾은 경우를 사람이 확인할 방법이 없다.
+    그러면 그 문항이 조용히 사라져 recall 이 실제보다 높게 나온다.
     숫자는 콤마 있는 형태와 없는 형태를 모두 시도한다.
     """
     import numpy as np
 
-    needles = {needle}
-    if re.fullmatch(r"[\d,]+", needle):
-        bare = needle.replace(",", "")
-        needles.add(bare)
-        if bare.isdigit():
-            needles.add(f"{int(bare):,}")
-    rows = np.flatnonzero(rt.receipt_no == str(rcept_no))
-    print(f"[grep] 접수번호 {rcept_no} · 청크 {len(rows):,}개 · "
-          f"찾는 문자열 {sorted(needles)}")
+    want = set()
+    for n in needles:
+        n = n.strip()
+        if not n:
+            continue
+        want.add(n)
+        if re.fullmatch(r"[\d,]+(?:\.\d+)?", n):
+            bare = n.replace(",", "")
+            want.add(bare)
+            head, _, tail = bare.partition(".")
+            if head.isdigit():
+                want.add(f"{int(head):,}" + (f".{tail}" if tail else ""))
+    if not want:
+        print("[grep] 찾을 문자열이 없다")
+        return
+
+    rows = np.flatnonzero((rt.stock_code == stock_code) & rt.is_latest)
+    print(f"[grep] {len(rows):,}개 청크에서 {sorted(want)} 를 찾는다 (최신본만)")
+    t0 = time.time()
     n = 0
     for row in rows:
         rec = rt.store.get(int(row))
         content = rec.get("content") or ""
-        if any(x in content for x in needles):
-            n += 1
-            sec = " > ".join(rec.get("section_path") or [])
-            pos = min((content.find(x) for x in needles if x in content), default=0)
-            print(f"  {rec.get('chunk_id')}")
-            print(f"    § {sec}")
-            print(f"    …{_WS.sub(' ', content[max(0, pos - 60):pos + 120])}…")
-    print(f"[grep] {n}개 청크에서 발견" if n else "[grep] 이 문서에 없다")
-
-
-def rcept_no_of(rt, corp_stock, rcept_dt):
-    import numpy as np
-    m = (rt.rcept_dt == str(rcept_dt))
-    if corp_stock:
-        m &= (rt.stock_code == corp_stock)
-    rows = np.flatnonzero(m)
-    return sorted({str(rt.receipt_no[r]) for r in rows})
+        got = [x for x in want if x in content]
+        if not got:
+            continue
+        n += 1
+        if n <= GREP_MAX_HITS:
+            no = str(rt.receipt_no[row])
+            mark = " ←doc_info" if no in rcept_hint else ""
+            pos = content.find(got[0])
+            print(f"  {rec.get('chunk_id')}  [{rt.doc_group[row]} · {no}{mark}]")
+            print(f"    § {' > '.join(rec.get('section_path') or [])}")
+            print(f"    …{_WS.sub(' ', content[max(0, pos - 60):pos + 140])}…")
+    extra = f" (앞 {GREP_MAX_HITS}개만 표시)" if n > GREP_MAX_HITS else ""
+    print(f"[grep] {n}개 청크에서 발견{extra} · {time.time() - t0:.1f}초"
+          if n else f"[grep] 이 회사 문서에 없다 · {time.time() - t0:.1f}초")
 
 
 HELP = """  0 또는 0,3   정답 청크 번호(여러 개 가능)      n  top-20 안에 정답 없음
-  s            보류(나중에 다시)                   e  검색어를 직접 입력해 재검색
-  g <문자열>   원문 직접 찾기(콤마 유무 모두 시도)  ?  도움말
+  g            ground_truth 의 숫자를 전부 원문에서 찾는다
+  g <문자열>   그 문자열을 원문에서 찾는다(콤마 유무 모두 시도)
+  e            검색어를 직접 입력해 재검색            s  보류(나중에 다시)
+  a            정답(ground_truth) 다시 보기          ?  도움말
   q            저장하고 종료"""
 
 
@@ -549,6 +552,7 @@ def label(dry_run=False) -> int:
         print("남은 문항이 없다.")
         return 0
 
+    from src.search.aliases import resolve_company
     from src.search.hybrid import Retriever
     rt = Retriever()
 
@@ -558,21 +562,29 @@ def label(dry_run=False) -> int:
     while queue:
         t = queue.pop(0)
         query = t["search_query"]
+        card = resolve_company(t["corp"])
+        stock = card.get("stock_code")
         while True:
             print(f"\n{'=' * 78}")
-            print(f"[{t['n']}/{len(todo)}] {t['corp']} · {t.get('report_nm')} · "
-                  f"접수 {t['rcept_dt']} · {t['type']} · {t['grp']} · {t.get('sector')}")
+            print(f"[{t['n']}/{len(todo)}] {t['corp']} · {t['type']} · {t.get('sector')}")
             print(f"{'=' * 78}")
-            print("원 질문:")
+            print("질문:")
             for line in _wrap(t["question"]):
                 print("  " + line)
+            print("\n정답(ground_truth):")
+            for line in _wrap(t["ground_truth"]):
+                print("  " + line)
+            if t.get("doc_info"):
+                print("\ndoc_info(참고, 필터로는 안 씀):")
+                for line in _wrap(t["doc_info"]):
+                    print("  " + line)
             print(f"\n검색어(변환): {query}")
             if query != t["search_query"]:
                 print(f"  (원래 변환값: {t['search_query']})")
             print(BAR)
             t0 = time.time()
-            res = rt.search(query, corp_name=t["corp"], rcept_dt=t["rcept_dt"],
-                            top_k=TOP_K, pool=max(TOP_K, 50), per_doc=TOP_K)
+            res = rt.search(query, corp_name=t["corp"], top_k=TOP_K,
+                            pool=max(TOP_K, 50), per_doc=TOP_K)
             hits = show_hits(res)
             print(f"(검색 {time.time() - t0:.2f}초)")
             if dry_run:
@@ -587,6 +599,8 @@ def label(dry_run=False) -> int:
 
             if cmd == "?":
                 continue
+            if cmd == "a":
+                continue
             if cmd == "q":
                 print(f"\n저장하고 종료. 이번 세션에 {written}건 기록.")
                 return 0
@@ -598,17 +612,17 @@ def label(dry_run=False) -> int:
                 if new:
                     query = new
                 continue
-            if cmd.startswith("g "):
-                needle = cmd[2:].strip()
-                nos = rcept_no_of(rt, res.get("filters", {}).get("stock_code"),
-                                  t["rcept_dt"])
-                if not nos:
-                    print("[grep] 그 접수일의 문서를 못 찾았다")
-                for no in nos:
-                    grep_doc(rt, no, needle)
+            if cmd == "g" or cmd.startswith("g "):
+                arg = cmd[2:].strip() if len(cmd) > 1 else ""
+                needles = ([arg] if arg
+                           else _NUMBER.findall(t["ground_truth"] or ""))
+                if not stock:
+                    print(f"[grep] 회사명을 못 풀었다: {card.get('status')}")
+                else:
+                    grep_company(rt, stock, needles, set(t.get("rcept_nos") or ()))
                 continue
             if cmd == "n":
-                _write(t, query, [], ["not_in_top20"], "")
+                _write(t, query, [], [], ["not_in_top20"], "")
                 written += 1
                 break
             ids = _parse_ids(cmd, len(hits))
@@ -616,11 +630,14 @@ def label(dry_run=False) -> int:
                 print("!! 알 수 없는 입력. '?' 로 도움말")
                 continue
             gold = [hits[i]["chunk_id"] for i in ids]
+            # 공시그룹은 문항이 아니라 **사람이 고른 청크가 실제로 있던 공시**에서 온다
+            groups = sorted({(hits[i].get("source") or {}).get("doc_group")
+                             for i in ids if (hits[i].get("source") or {}).get("doc_group")})
             note = input("메모(없으면 엔터)> ").strip()
             tags = ["edited_query"] if query != t["search_query"] else []
-            _write(t, query, gold, tags, note)
+            _write(t, query, gold, groups, tags, note)
             written += 1
-            print(f"기록: {gold}")
+            print(f"기록: {gold} · 공시그룹 {groups}")
             break
 
     if deferred:
@@ -639,14 +656,17 @@ def _parse_ids(cmd: str, n: int):
     return sorted(set(ids))
 
 
-def _write(t: dict, query: str, gold: list, tags: list, note: str) -> None:
+def _write(t: dict, query: str, gold: list, groups: list, tags: list, note: str) -> None:
     rec = {
         "qid": t["qid"], "question": t["question"],
-        "filters": {"corp_name": t["corp"], "rcept_dt": t["rcept_dt"],
-                    "fiscal_year": None},
+        "ground_truth": t["ground_truth"],
+        # 접수일은 안 준다. benchmark_*.json 은 문항별 문서를 특정하지 않는다.
+        "filters": {"corp_name": t["corp"], "rcept_dt": None, "fiscal_year": None},
         "search_query": query, "gold_chunk_ids": gold,
-        "answer_type": t["type"], "doc_group": t["grp"],
-        "tags": sorted(set(tags + [t["type"], t["grp"]])),
+        "answer_type": t["type"],
+        "doc_group": groups[0] if len(groups) == 1 else None,
+        "doc_groups": groups,
+        "tags": sorted(set(tags + [t["type"]] + groups)),
         "labeled_at": datetime.now().isoformat(timespec="seconds"), "note": note,
     }
     with open(GOLDEN, "a", encoding="utf-8") as fh:
@@ -685,7 +705,7 @@ def main() -> int:
 
     if a.show_queries:
         for t in load_todo():
-            print(f"[{t['n']:>2}] {t['corp']} · {t['type']} · {t['grp']}")
+            print(f"[{t['n']:>2}] {t['corp']} · {t['type']}")
             print(f"  전: {t['question']}")
             print(f"  후: {t['search_query']}\n")
         return 0
