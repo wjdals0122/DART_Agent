@@ -46,7 +46,10 @@ PER_DOC = 2         # 한 문서가 결과를 독점하지 못하게
 POOL = 50           # 리랭커(단계 4) 입력이 될 후보 수
 TEXT_CUT = 1500     # 반환 본문 컷
 SHORT_CHUNK = 150   # 규칙 2: 이 길이 미만이면 '제목만 있는 청크' 후보
-LOOKBACK = 2        # 규칙 1: 몇 칸까지 거슬러 올라갈지
+LOOKBACK = 6        # 규칙 1: 몇 칸까지 거슬러 올라갈지.
+                    # 2였을 때 '앞 2칸에 캡션 없음' 으로 놓친 것의 46%가 3~8칸 뒤에 있었다.
+                    # 넓은 표가 여러 조각으로 쪼개진 경우다(KB금융 자본변동표가 3조각).
+                    # 거리가 늘어도 '남의 표를 만나면 중단' 은 그대로라 안전하다.
 UNIT_MARK = "(단위"
 CAP_TAIL = ("다음과 같습니다", "다음과 같음", "다음과 같다", "현황")
 AUG_HEAD = "[인접 청크에서 보강: 단위·제목]"
@@ -131,7 +134,11 @@ def _caption_lines(prev_text: str, cur_head: str):
         return [], True
     tidx = [i for i, l in enumerate(ls) if l.lstrip().startswith("|")]
     if not tidx:
-        return _pick(ls), True                       # 표가 없는 청크 — 안전하다
+        # 표가 없는 청크. 여기서 캡션을 못 찾으면 **더 올라가지 않는다.**
+        # 산문 한 덩이가 사이에 끼어 있으면 그 위는 다른 이야기다. 실제로 거리를 6으로
+        # 늘렸을 때 CJ제일제당 신용평가 표에 3칸 위의 '(첨부 이미지: 대표이사 확인서)'
+        # 가 붙었다. 사슬은 '같은 표의 조각' 으로만 이어야 한다.
+        return _pick(ls), False
 
     tail = _pick(ls[tidx[-1] + 1:])                  # (a) 꼬리 캡션
     if tail:
