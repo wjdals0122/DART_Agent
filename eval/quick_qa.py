@@ -24,7 +24,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from src.agent import clova                       # noqa: E402
-from src.agent.context import build_context       # noqa: E402
+from src.agent.context import build_context, ensure_doc_map  # noqa: E402
 
 SYSTEM_PATH = ROOT / "prompts" / "system_min.txt"
 BAR = "=" * 78
@@ -89,6 +89,13 @@ def main() -> int:
             print(f"[중단] {err}", file=sys.stderr)
             return 2
         print(f"[key] {clova.mask_key(key)} · [model] {clova.resolve_model(a.model)}")
+
+    # 표도 검색보다 먼저 본다. 없으면 여기서 만든다(약 14초). 인덱스를 올린 뒤
+    # 주석이 조용히 빠지는 것보다 지금 14초 쓰는 게 낫다.
+    ok, msg = ensure_doc_map()
+    print(f"[fiscal-map] {msg}")
+    if not ok:
+        print("[fiscal-map] 기수 주석 없이 계속한다.", file=sys.stderr)
 
     if not SYSTEM_PATH.exists():
         print(f"[중단] 시스템 프롬프트가 없다: {SYSTEM_PATH}", file=sys.stderr)

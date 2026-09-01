@@ -35,6 +35,11 @@
 
   python -m src.agent.context --build
 
+이 표는 git 에 안 들어간다(data/ 가 .gitignore 다). 새 환경에서 만드는 걸 잊으면
+주석이 통째로 사라지는데 에러가 안 나서 알아채기 어렵다. 그래서 **표가 없으면
+처음 쓸 때 자동으로 만든다**(`ensure_doc_map()`). 끄려면 DART_FISCAL_MAP_AUTOBUILD=0.
+표가 있는데 읽히지 않으면 덮어쓰지 않고 경고만 띄운다(규칙 6).
+
 실패하면 지어내지 않고 주석을 생략한다.
   - 문서가 표에 없다            -> 생략 (접수 연도로 때우지 않는다)
   - 청크의 기수 > 표의 당기 기수 -> 생략 + reports/annotate_era_overflow.jsonl 에 기록
@@ -50,8 +55,18 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import sys
 from pathlib import Path
+
+# 경고는 stderr 로 나가는데, 윈도우 콘솔 기본 코드페이지(cp949)에서는 한글이 깨진다.
+# 이 리포의 다른 모듈이 stdout 에 하는 것과 같은 처리를 stderr 에도 한 번 해 둔다.
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        pass
 
 ROOT = Path(__file__).resolve().parents[2]
 DOC_MAP_PATH = ROOT / "data" / "index" / "doc_fiscal_map.json"
@@ -194,20 +209,105 @@ _MAP_LOADED = False
 _MAP_WARNED = False
 
 
+def _banner(lines) -> None:
+    """놓치면 안 되는 경고. 한 줄짜리 print 는 인덱스 로딩 로그에 묻힌다."""
+    w = max(len(l) for l in lines) + 2
+    print(chr(10) + "!" * (w + 2), file=sys.stderr)
+    for l in lines:
+        print("! " + l, file=sys.stderr)
+    print("!" * (w + 2) + chr(10), file=sys.stderr, flush=True)
+
+
+def _autobuild_on() -> bool:
+    return (os.environ.get("DART_FISCAL_MAP_AUTOBUILD", "1").strip().lower()
+            not in ("0", "false", "no", "off"))
+
+
+def ensure_doc_map(auto_build=None) -> tuple[bool, str]:
+    """표가 쓸 수 있는 상태인지 보장한다. (성공여부, 설명) 을 돌려준다 — 예외 없음.
+
+    표가 **없으면** 자동으로 만든다(약 14초, 청크 전량 1회 스캔).
+    git 에 안 들어가는 파일이라 새 환경에서 --build 를 잊기 쉬운데,
+    잊으면 기수 주석이 통째로 사라지면서 아무 에러도 안 난다. 조용한 실패라 위험하다.
+
+    표가 **있는데 읽히지 않으면** 덮어쓰지 않는다(CLAUDE.md 규칙 6).
+    사람이 보고 지우든 다시 만들든 결정할 일이다. 경고만 크게 띄운다.
+
+    자동 빌드를 끄려면 DART_FISCAL_MAP_AUTOBUILD=0.
+    호출 시점을 앞당기고 싶으면(인덱스 30초 올리기 전에) 진입점에서 직접 부른다.
+    """
+    if auto_build is None:
+        auto_build = _autobuild_on()
+
+    if DOC_MAP_PATH.exists():
+        try:
+            json.loads(DOC_MAP_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            return False, (f"{DOC_MAP_PATH} 가 있는데 읽히지 않는다 "
+                           f"({type(e).__name__}: {e}). 덮어쓰지 않는다 — "
+                           f"파일을 지운 뒤 python -m src.agent.context --build")
+        # 낡았는지도 본다. manifest 나 청크가 표보다 새 것이면 표가 뒤처진 것이다.
+        stale = _stale_reason()
+        return True, (f"표 정상 ({stale})" if stale else "표 정상")
+
+    if not auto_build:
+        return False, (f"{DOC_MAP_PATH} 가 없다. 자동 빌드가 꺼져 있다"
+                       f"(DART_FISCAL_MAP_AUTOBUILD=0). "
+                       f"python -m src.agent.context --build 로 만든다")
+
+    _banner([f"{DOC_MAP_PATH.name} 가 없다 — 지금 만든다 (청크 전량 1회 스캔, 약 14초).",
+             "이 표가 없으면 '제17기=2023년' 같은 기수 주석이 통째로 빠진다.",
+             "끄려면 DART_FISCAL_MAP_AUTOBUILD=0"])
+    try:
+        st = build_doc_fiscal_map(verbose=True)
+    except Exception as e:      # noqa: BLE001 — 여기서 터지면 도구 전체가 죽는다
+        return False, (f"자동 빌드 실패 ({type(e).__name__}: {e}). "
+                       f"청크 파일({paths_hint()})이 있는지 확인해라")
+    return True, f"자동 빌드 완료 — doc_id {st.get('n_doc_ids', 0):,}건"
+
+
+def paths_hint() -> str:
+    try:
+        from src.index import paths
+        return str(paths.CHUNKS_DIR)
+    except Exception:           # noqa: BLE001 — 안내 문구용이라 실패해도 그만
+        return "data/processed/chunks_by_10_companies"
+
+
+def _stale_reason():
+    """표보다 새 입력 파일이 있으면 그 이름. 없으면 None. (덮어쓰지는 않는다)"""
+    try:
+        t = DOC_MAP_PATH.stat().st_mtime
+        newer = [p.name for p in (MANIFEST_PATH,) if p.exists() and p.stat().st_mtime > t]
+        from src.index import paths
+        newer += [p.name for p in paths.chunk_files() if p.stat().st_mtime > t]
+    except Exception:           # noqa: BLE001 — 판단이 안 서면 조용히 넘어간다
+        return None
+    if not newer:
+        return None
+    return ("주의: 표보다 새 입력이 있다 — " + ", ".join(newer[:3])
+            + " · 다시 만들려면 python -m src.agent.context --build")
+
+
 def _doc_map():
     """표를 한 번만 읽어 캐시한다. 없으면 None (예외 없음)."""
     global _MAP, _MAP_LOADED, _MAP_WARNED
     if not _MAP_LOADED:
         _MAP_LOADED = True
-        try:
-            _MAP = _DocFiscalMap(json.loads(DOC_MAP_PATH.read_text(encoding="utf-8")))
-        except (OSError, ValueError) as e:
+        ok, msg = ensure_doc_map()
+        if ok:
+            try:
+                _MAP = _DocFiscalMap(json.loads(DOC_MAP_PATH.read_text(encoding="utf-8")))
+            except (OSError, ValueError) as e:
+                ok, msg = False, f"표를 읽는 중 실패 ({type(e).__name__}: {e})"
+        if ok and msg.startswith("표 정상 ("):
+            print(f"[context] {msg[len('표 정상 ('):-1]}", file=sys.stderr, flush=True)
+        if not ok:
             _MAP = None
             if not _MAP_WARNED:
                 _MAP_WARNED = True
-                print(f"[context] {DOC_MAP_PATH} 를 읽지 못했다 — 기수 주석을 전부 생략한다. "
-                      f"({type(e).__name__}: {e}) "
-                      f"python -m src.agent.context --build 로 만든다", flush=True)
+                _banner(["기수 주석을 전부 생략한다 — '제17기=2023년' 힌트가 안 나간다.",
+                         msg])
     return _MAP
 
 

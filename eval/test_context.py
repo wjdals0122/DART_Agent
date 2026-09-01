@@ -20,7 +20,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from src.agent.context import (DOC_MAP_PATH, annotate, build_context,  # noqa: E402
-                               correction_note, _doc_map)
+                               correction_note, ensure_doc_map, _doc_map)
 
 FAIL = []
 
@@ -51,8 +51,10 @@ def result(text, section, *, corp="CJ제일제당", report="분기보고서 (202
     return r
 
 
-if not DOC_MAP_PATH.exists():
-    print(f"[중단] {DOC_MAP_PATH} 가 없다. python -m src.agent.context --build")
+ok, msg = ensure_doc_map()      # 없으면 여기서 만든다
+print(f"[fiscal-map] {msg}")
+if not ok:
+    print(f"[중단] 표를 쓸 수 없다: {msg}")
     raise SystemExit(2)
 check("문서 표 로드", len(_doc_map()) > 1000, f"doc_id {len(_doc_map()):,}건")
 
