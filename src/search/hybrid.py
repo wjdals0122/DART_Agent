@@ -1,19 +1,24 @@
-"""하이브리드 검색기 — 하드필터 우선 + BM25/dense RRF 융합.
+"""1-C 하이브리드 검색기 — 하드필터 우선 + BM25/dense RRF 융합.
 
 【설계의 핵심: 하드필터를 먼저 건다】
-회사·연도로 후보를 좁힌 **뒤** 그 안에서만 점수를 낸다.
+회사·연도·문서로 후보를 좁힌 **뒤** 그 안에서만 점수를 낸다.
 전체에서 top-k 를 뽑고 나중에 거르면, 회사 하나로 좁혔을 때 0건이 된다.
 
 【코드 체계 주의 — 치명 A】
 id_map.parquet 의 corp_code 컬럼은 실제로 6자리 종목코드다.
 universe.csv 의 corp_code 는 8자리 DART 고유번호로 값 체계가 다르다.
 여기서는 로드하자마자 stock_code 로 이름을 바꿔 혼동을 코드에서 제거한다.
-필터 파라미터로 corp_code(8자리)를 받지 않는다.
+필터 파라미터로 corp_code(8자리)를 받지 않는다 — 남겨두면 누군가 8자리를 넣고,
+그러면 필터가 항상 0건이 되면서 에러도 경고도 나지 않는다.
 
 【base_year 주의】
-id_map 의 base_year 는 **접수 연도**(receipt_no 앞 4자리)다. 사업연도가 아니다.
+id_map 의 base_year 는 **접수 연도**(rcept_dt 앞 4자리)다. 사업연도가 아니다.
 2024 사업연도 사업보고서는 2025년에 접수되므로 base_year=2025 다.
 사업연도로 거르려면 report_nm 의 '(2024.12)' 를 봐야 한다 — fiscal_year 인자를 쓴다.
+
+  from src.search.hybrid import Retriever
+  rt = Retriever()
+  rt.search("연결 기준 매출액", corp_name="삼성전자", fiscal_year=2024, top_k=5)
 """
 from __future__ import annotations
 
@@ -39,8 +44,104 @@ RRF_K = 60          # 표준값. 1위가 1/61, 200위가 1/260
 TOP_M = 200         # 각 리스트에서 이 순위 안에 든 것만 융합에 기여한다
 PER_DOC = 2         # 한 문서가 결과를 독점하지 못하게
 POOL = 50           # 리랭커(단계 4) 입력이 될 후보 수
+TEXT_CUT = 1500     # 반환 본문 컷
+SHORT_CHUNK = 150   # 규칙 2: 이 길이 미만이면 '제목만 있는 청크' 후보
+LOOKBACK = 2        # 규칙 1: 몇 칸까지 거슬러 올라갈지
+UNIT_MARK = "(단위"
+CAP_TAIL = ("다음과 같습니다", "다음과 같음", "다음과 같다", "현황")
+AUG_HEAD = "[인접 청크에서 보강: 단위·제목]"
+AUG_NEXT = "[인접 청크에서 보강: 다음 청크의 표]"
+AUG_BODY = "[여기부터 검색된 청크 원문]"
 _NONDIGIT = re.compile(r"[^0-9]")
 _FY = re.compile(r"\((\d{4})[.\-/](\d{1,2})\)")
+
+
+# ---------------------------------------------------------------- 인접 청크 보강
+#
+# 【왜 필요한가】
+# 청커가 표 제목과 표 본문을 다른 청크로 갈라놓는 일이 많다. 전량 조사 결과
+#   - 제목 없이 곧바로 표 행으로 시작하는 청크 361,954개 (58.9%)
+#   - 제목만 있고 표는 다음 청크에 있는 청크 17,081개 (2.8%)
+# 앞의 것이 특히 위험하다. 표 안에 '(단위 : 백만원)' 이 없으면 LLM 이 단위를 추측하고,
+# 실제로 KB금융 자기자본을 백만원 표에서 읽고 십억원을 붙여 1000배 틀린 적이 있다.
+#
+# 【왜 앞뒤를 무조건 붙이지 않는가】
+# 다른 표의 단위가 섞이면 지금보다 나빠진다. 그래서 규칙을 좁게 잡았다.
+#   규칙 1  표로 시작하고 단위 표기가 없을 때만, 최대 2칸 거슬러 올라가
+#           단위·제목 **줄만** 뽑아 앞에 붙인다. 중간에 다른 표를 만나면 중단한다
+#   규칙 2  짧고(150자 미만) 표가 없을 때만, 바로 다음 청크가 표일 때 이어 붙인다
+# 둘은 조건이 배타적이라(하나는 표로 시작, 하나는 표가 없음) 동시에 걸리지 않는다.
+# doc_id 경계는 절대 넘지 않는다.
+
+
+def _lines(text: str) -> list:
+    return [l for l in (text or "").splitlines() if l.strip()]
+
+
+def _starts_with_table(text: str) -> bool:
+    ls = _lines(text)
+    return bool(ls) and ls[0].lstrip().startswith("|")
+
+
+def _has_table(text: str) -> bool:
+    return any(l.lstrip().startswith("|") for l in (text or "").splitlines())
+
+
+def _caption_end(line: str) -> bool:
+    t = (line or "").rstrip()
+    if not t:
+        return False
+    if t.endswith(")") or t.endswith("）"):
+        return True
+    return any(t.endswith(w) or t.endswith(w + ".") for w in CAP_TAIL)
+
+
+CAP_MAX = 120       # 단위 없는 '제목' 줄로 인정할 최대 길이
+
+
+def _pick(lines: list) -> list:
+    """단위·제목 줄만 고른다. 표 데이터 행은 캡션이 아니다.
+
+    '|' 가 2개 이상인 줄을 빼는 이유: 표 안의 데이터 행이 '(단위: 원)' 을 품고 있는
+    경우가 있어서, 그걸 캡션으로 착각하면 남의 표 단위를 끌어온다.
+    """
+    out = []
+    for i, raw in enumerate(lines):
+        t = raw.strip()
+        if t.count("|") >= 2:
+            continue
+        if UNIT_MARK in t:
+            out.append(t)
+        elif i == len(lines) - 1 and len(t) <= CAP_MAX and _caption_end(t):
+            out.append(t)
+    return out[-2:]
+
+
+def _caption_lines(prev_text: str, cur_head: str):
+    """앞 청크에서 붙일 줄을 고른다. (줄 목록, 계속 거슬러 올라가도 되는가).
+
+    앞 청크가 표를 품고 있으면 위험하다 — 그 표의 단위를 우리 표에 붙일 수 있다.
+    그래서 두 경우만 허용한다.
+      (a) 그 표의 마지막 행 **뒤**에 붙은 꼬리 캡션 -> 우리 표를 여는 제목이다
+      (b) 우리 청크가 그 표의 이어짐(첫 표 행이 글자 그대로 같다) -> 표 앞 단위가 맞다
+    둘 다 아니면 빈 목록 + '멈춰라' 를 돌려준다.
+    """
+    ls = _lines(prev_text)
+    if not ls:
+        return [], True
+    tidx = [i for i, l in enumerate(ls) if l.lstrip().startswith("|")]
+    if not tidx:
+        return _pick(ls), True                       # 표가 없는 청크 — 안전하다
+
+    tail = _pick(ls[tidx[-1] + 1:])                  # (a) 꼬리 캡션
+    if tail:
+        return tail, False
+    if cur_head and ls[tidx[0]].strip() == cur_head:  # (b) 같은 표의 이어짐
+        # 표 앞에 아무것도 없으면 **더 거슬러 올라가도 된다.** 같은 표라는 게 확인됐으니
+        # 그 위의 제목 청크에 있는 단위가 이 표의 단위다.
+        # (KB금융 자본변동표가 제목 / 표1 / 표2 세 청크로 쪼개져 있어 실제로 필요했다)
+        return _pick(ls[:tidx[0]]), True
+    return [], False                                 # 남의 표 — 붙이지 않고 멈춘다
 
 
 def _ymd(v):
@@ -51,7 +152,13 @@ def _ymd(v):
     return s or None
 
 
-class HybridSearch:
+def _as_list(v):
+    if v is None:
+        return None
+    return [v] if isinstance(v, (str, int, np.integer)) else list(v)
+
+
+class Retriever:
     def __init__(self, device: str = "cuda", gpu: int = 0, verbose: bool = True) -> None:
         self.device = device
         self.gpu = gpu
@@ -59,47 +166,62 @@ class HybridSearch:
         t0 = time.time()
 
         idm = pd.read_parquet(paths.ID_MAP)
-        # 치명 A: 이름 충돌을 여기서 없앤다
-        idm = idm.rename(columns={"corp_code": "stock_code"})
-        idm["stock_code"] = idm["stock_code"].astype(str).str.zfill(6)
-        idm["base_year"] = idm["base_year"].astype(np.int32)
-        idm["rcept_dt"] = idm["rcept_dt"].astype(str)
-        idm["receipt_no"] = idm["receipt_no"].astype(str)
+        # C1 — 이름 충돌을 여기서 없앤다
+        idm = idm.rename(columns={"corp_code": "stock_code", "company": "corp_name_idx"})
+
+        # C4 — dtype 명시 캐스팅 + 결측률 로그
+        idm["stock_code"] = idm["stock_code"].astype("string").str.zfill(6)
+        idm["base_year"] = idm["base_year"].astype("Int64")
+        for c in ("doc_group", "doc_id", "chunk_id", "receipt_no",
+                  "rcept_dt", "corp_name_idx", "embed_sha1"):
+            idm[c] = idm[c].astype("string")
+        miss = {c: int(idm[c].isna().sum()) for c in idm.columns}
+        bad = {c: v for c, v in miss.items() if v}
+        self._log(f"[idmap] {len(idm):,}행 · 결측 " + (f"{bad}" if bad else "없음"))
 
         man = pd.DataFrame([json.loads(l) for l in open(MANIFEST, encoding="utf-8")])
         man = man[["rcept_no", "report_nm", "doc_subtype"]].rename(
             columns={"rcept_no": "receipt_no"})
-        man["receipt_no"] = man["receipt_no"].astype(str)
+        man["receipt_no"] = man["receipt_no"].astype("string")
         idm = idm.merge(man, on="receipt_no", how="left")
         if idm["report_nm"].isna().any():
             raise SystemExit("manifest 조인 실패 — report_nm 결측")
 
         self.n = len(idm)
-        self.stock_code = idm["stock_code"].to_numpy()
-        self.company = idm["company"].to_numpy()
-        self.doc_group = idm["doc_group"].to_numpy()
-        self.base_year = idm["base_year"].to_numpy()
-        self.rcept_dt = idm["rcept_dt"].to_numpy()
-        self.receipt_no = idm["receipt_no"].to_numpy()
+        self.stock_code = idm["stock_code"].to_numpy(dtype=object)
+        self.company = idm["corp_name_idx"].to_numpy(dtype=object)
+        self.doc_group = idm["doc_group"].to_numpy(dtype=object)
+        self.base_year = idm["base_year"].to_numpy(dtype=np.int32)
+        self.rcept_dt = idm["rcept_dt"].to_numpy(dtype=object)
+        self.receipt_no = idm["receipt_no"].to_numpy(dtype=object)
         self.receipt_i = idm["receipt_no"].astype(np.int64).to_numpy()
-        self.doc_id = idm["doc_id"].to_numpy()
-        self.chunk_id = idm["chunk_id"].to_numpy()
-        self.embed_sha1 = idm["embed_sha1"].to_numpy()
-        self.report_nm = idm["report_nm"].to_numpy()
+        self.doc_id = idm["doc_id"].to_numpy(dtype=object)
+        self.chunk_id = idm["chunk_id"].to_numpy(dtype=object)
+        self.embed_sha1 = idm["embed_sha1"].to_numpy(dtype=object)
+        self.report_nm = idm["report_nm"].to_numpy(dtype=object)
+        self.doc_subtype = idm["doc_subtype"].to_numpy(dtype=object)
         # report_nm 의 '(2024.12)' 에서 사업연도를 뽑아둔다 (base_year 는 접수연도라 다르다)
         fy = idm["report_nm"].str.extract(_FY)[0]
         self.fiscal_year = fy.fillna(-1).astype(np.int32).to_numpy()
 
+        # C5 — is_latest 는 latest_mask.npz 가 정본이다.
+        # manifest 의 is_correction 으로 거르면 정확히 반대로 작동한다(정정본이 최신본이다).
         z = np.load(MASK)
         self.is_latest = z["is_latest"]
         self.preserved = z["preserved"]
         self.series_code = z["series_code"]
+        for name, arr in (("is_latest", self.is_latest), ("preserved", self.preserved),
+                          ("series_code", self.series_code)):
+            if arr.shape[0] != self.n:
+                raise SystemExit(f"[mask] {name} 길이 {arr.shape[0]:,} != id_map {self.n:,}")
         n_excl = int((~self.is_latest).sum())
         self._log(f"[correction] 구본 제외 {n_excl:,}행 · 보존 {int(self.preserved.sum()):,}행")
         if n_excl == 0:
             raise SystemExit("[correction] 제외 0건 — latest_mask 가 비었다. 중단")
 
         self.bm25 = BM25()
+        if self.bm25.n != self.n:
+            raise SystemExit(f"[bm25] 행 수 {self.bm25.n:,} != id_map {self.n:,}")
         self.store = ChunkStore()
         self._load_dense()
         self._load_model()
@@ -141,26 +263,27 @@ class HybridSearch:
             devices="cuda:0" if self.device == "cuda" else "cpu")
         self._log(f"[load] {paths.MODEL_NAME} ({time.time() - t:.1f}초)")
 
-    # ---------------------------------------------------------------- 필터
+    # ---------------------------------------------------------------- 1. 하드필터
 
     def _candidates(self, stock_code=None, base_year=None, fiscal_year=None,
-                    doc_group=None, rcept_dt_from=None, rcept_dt_to=None,
+                    doc_group=None, rcept_no=None, rcept_dt=None,
+                    rcept_dt_from=None, rcept_dt_to=None,
                     include_superseded=False) -> np.ndarray:
         m = np.ones(self.n, dtype=bool)
-        if not include_superseded:
+        if not include_superseded:                       # C6
             m &= self.is_latest
-        if stock_code:
-            codes = [stock_code] if isinstance(stock_code, str) else list(stock_code)
-            m &= np.isin(self.stock_code, [str(c).zfill(6) for c in codes])
+        if stock_code:                                   # C2 — 6자리만 받는다
+            m &= np.isin(self.stock_code, [str(c).zfill(6) for c in _as_list(stock_code)])
         if base_year is not None:
-            ys = [base_year] if isinstance(base_year, int) else list(base_year)
-            m &= np.isin(self.base_year, [int(y) for y in ys])
+            m &= np.isin(self.base_year, [int(y) for y in _as_list(base_year)])
         if fiscal_year is not None:
-            ys = [fiscal_year] if isinstance(fiscal_year, int) else list(fiscal_year)
-            m &= np.isin(self.fiscal_year, [int(y) for y in ys])
+            m &= np.isin(self.fiscal_year, [int(y) for y in _as_list(fiscal_year)])
         if doc_group:
-            gs = [doc_group] if isinstance(doc_group, str) else list(doc_group)
-            m &= np.isin(self.doc_group, gs)
+            m &= np.isin(self.doc_group, _as_list(doc_group))
+        if rcept_no:                                     # C3 — 문서 특정
+            m &= np.isin(self.receipt_no, [str(v) for v in _as_list(rcept_no)])
+        if rcept_dt:                                     # C3 — 접수일 특정
+            m &= np.isin(self.rcept_dt, [_ymd(v) for v in _as_list(rcept_dt)])
         f, t = _ymd(rcept_dt_from), _ymd(rcept_dt_to)
         if f:
             m &= self.rcept_dt >= f
@@ -168,47 +291,70 @@ class HybridSearch:
             m &= self.rcept_dt <= t
         return np.flatnonzero(m)
 
-    # ---------------------------------------------------------------- 점수
+    # ---------------------------------------------------------------- 2~3. 점수
 
     def _dense_scores(self, query: str, cand: np.ndarray) -> np.ndarray:
         out = self.model.encode([query], batch_size=1, max_length=512,
                                 return_dense=True, return_sparse=False,
                                 return_colbert_vecs=False)
         q = np.asarray(out["dense_vecs"][0], dtype=np.float32)
+        # C8 — 후보가 넓으면 전량 곱하고 뒤에서 뽑는다. 좁으면 후보만 잘라 곱한다.
+        #      팬시 인덱싱은 후보가 넓을 때 행렬 전체를 복사한다.
+        wide = cand.size > 0.3 * self.n
         if self.torch is not None:
             qt = self.torch.from_numpy(q).to("cuda", self.torch.float16)
-            s = (self.dense @ qt).float().cpu().numpy()
+            if wide:
+                s = (self.dense @ qt).float().cpu().numpy()[cand]
+            else:
+                idx = self.torch.from_numpy(np.ascontiguousarray(cand)).to("cuda")
+                s = (self.dense[idx] @ qt).float().cpu().numpy()
         else:
-            s = self.dense @ q
-        return s[cand]
+            s = (self.dense @ q)[cand] if wide else self.dense[cand] @ q
+        return s
 
-    @staticmethod
-    def _ranks(scores: np.ndarray, top_m: int) -> dict:
-        """점수 상위 top_m 의 {후보 인덱스: 순위}. 0점 이하는 리스트에 없는 것으로 본다."""
-        nz = np.flatnonzero(scores > 0)
-        if nz.size == 0:
-            return {}
-        k = min(top_m, nz.size)
-        part = nz[np.argpartition(-scores[nz], k - 1)[:k]]
-        order = part[np.argsort(-scores[part])]
-        return {int(i): r for r, i in enumerate(order, 1)}
+    # ---------------------------------------------------------------- 4. RRF
 
-    # ---------------------------------------------------------------- 검색
+    def _rrf(self, vsc: np.ndarray, bsc: np.ndarray, w_vec: float = 1.0,
+             w_bm25: float = 1.0, top_m: int = TOP_M, K: int = RRF_K) -> np.ndarray:
+        """C7 — 각 리스트의 top-M 안에 든 후보만 기여한다.
+
+        후보 전체에 순위를 매겨 융합하면, 질의어를 하나도 포함하지 않은 문서가
+        argsort 에서 임의의 중간 순위를 배정받아 그 순위가 점수에 기여한다.
+        BM25 0점은 '그 리스트에 없음' 으로 취급해 버린다.
+        """
+        n = len(vsc)
+        out = np.zeros(n, dtype=np.float32)
+        M = min(top_m, n)
+        for sc, w, drop_zero in ((vsc, w_vec, False), (bsc, w_bm25, True)):
+            if M < n:
+                top = np.argpartition(-sc, M - 1)[:M]
+            else:
+                top = np.arange(n)
+            top = top[np.argsort(-sc[top])]
+            if drop_zero:
+                top = top[sc[top] > 0]
+            out[top] += w / (K + np.arange(len(top), dtype=np.float32) + 1)
+        return out
+
+    # ---------------------------------------------------------------- 5~6. 조립
 
     def search(self, query: str, corp_name=None, stock_code=None, base_year=None,
-               fiscal_year=None, doc_group=None, rcept_dt_from=None, rcept_dt_to=None,
-               top_k: int = 5, pool: int = POOL, top_m: int = TOP_M,
-               per_doc: int = PER_DOC, include_superseded: bool = False,
+               fiscal_year=None, doc_group=None, rcept_no=None, rcept_dt=None,
+               rcept_dt_from=None, rcept_dt_to=None, top_k: int = 5, pool: int = POOL,
+               top_m: int = TOP_M, per_doc: int = PER_DOC, w_vec: float = 1.0,
+               w_bm25: float = 1.0, include_superseded: bool = False,
                **_ignored) -> dict:
         t0 = time.time()
         filters = {"corp_name": corp_name, "stock_code": stock_code,
                    "base_year": base_year, "fiscal_year": fiscal_year,
-                   "doc_group": doc_group,
+                   "doc_group": doc_group, "rcept_no": rcept_no,
+                   "rcept_dt": _ymd(rcept_dt),
                    "rcept_dt_from": _ymd(rcept_dt_from), "rcept_dt_to": _ymd(rcept_dt_to),
                    "include_superseded": include_superseded}
         empty = {"query": query, "filters": filters, "results": [], "pool": [],
                  "n_candidates": 0, "n_pool": 0, "n_preserved_dropped": 0}
 
+        # C11 — 0건은 예외가 아니다
         if corp_name:
             r = resolve_company(corp_name)
             if r["status"] == "not_found":
@@ -217,110 +363,158 @@ class HybridSearch:
             if r["status"] == "ambiguous":
                 return {**empty, "status": "ambiguous", "candidates": r["candidates"],
                         "note": r.get("note", "회사가 특정되지 않는다")}
-            stock_code = r["stock_code"]
+            stock_code = r["stock_code"]                  # C2
             filters["stock_code"] = stock_code
 
         cand = self._candidates(stock_code, base_year, fiscal_year, doc_group,
-                                rcept_dt_from, rcept_dt_to, include_superseded)
+                                rcept_no, rcept_dt, rcept_dt_from, rcept_dt_to,
+                                include_superseded)
         if cand.size == 0:
             return {**empty, "status": "not_found", "note": "필터 조건에 맞는 문서가 없다"}
 
-        bm = self.bm25.score(query, rows=cand)
-        dn = self._dense_scores(query, cand)
-        r_bm = self._ranks(bm, top_m)
-        r_dn = self._ranks(dn, top_m)
+        bsc = self.bm25.score(query, rows=cand)
+        vsc = self._dense_scores(query, cand)
+        rrf = self._rrf(vsc, bsc, w_vec, w_bm25, top_m)
 
-        # RRF — 각 리스트의 top_m 안에 든 것만 기여한다.
-        # BM25 0점(질의어 미포함)은 리스트에 없으므로 가짜 순위로 끼어들지 못한다.
-        rrf = {}
-        for d in (r_bm, r_dn):
-            for i, rank in d.items():
-                rrf[i] = rrf.get(i, 0.0) + 1.0 / (RRF_K + rank)
-        if not rrf:
+        order = np.flatnonzero(rrf > 0)
+        if order.size == 0:
             return {**empty, "status": "not_found", "n_candidates": int(cand.size),
                     "note": "질의어를 포함하거나 의미가 가까운 청크가 없다"}
+        # 정렬 키: RRF 내림차순, 동점이면 접수번호 큰 쪽(최신본) 우선 — C9(b)
+        order = sorted(order.tolist(),
+                       key=lambda i: (-float(rrf[i]), -int(self.receipt_i[cand[i]])))
 
-        idxs = list(rrf.keys())
-        # 정렬 키: RRF 내림차순, 동점이면 접수번호 큰 쪽(최신본) 우선
-        idxs.sort(key=lambda i: (-rrf[i], -int(self.receipt_i[cand[i]])))
-
-        # 확정 4(개정 B) — preserved(정정 전 첨부) 조건부 드롭.
-        # 같은 계열의 최신본이 **그보다 위 순위에** 이미 뽑혔을 때만 버린다.
-        #   "매출액"   → 최신본이 위 → 같은 수치의 중복이므로 버린다
-        #   "감사의견" → 정정 전이 위 → 최신본에 없는 내용이므로 남긴다
-        # 계열 단위로 일괄 드롭하면 후자에서 유일한 근거가 사라진다(실측 확인).
-        # 드롭된 행은 pool 자리를 차지하지 않는다 — 리랭커가 쓸 후보 수를 지키기 위해서다.
-        picked = []          # (전체 row, 후보 인덱스)
-        seen_sha = set()
-        per = {}
-        latest_series = set()
-        n_dropped = 0
-        for i in idxs:
+        # C9 — (a) 문서당 상한 → (b) sha1 중복 제거 → pool 확보
+        picked: list[tuple[int, int]] = []               # (전체 row, 후보 인덱스)
+        seen_sha: set = set()
+        per: dict = {}
+        for i in order:
             row = int(cand[i])
-            sha = self.embed_sha1[row]
-            if sha in seen_sha:                   # 같은 내용 중복 제거
-                continue
             d = self.doc_id[row]
-            if per.get(d, 0) >= per_doc:          # 문서당 상한
+            if per.get(d, 0) >= per_doc:
                 continue
-            if self.preserved[row] and int(self.series_code[row]) in latest_series:
-                n_dropped += 1
+            sha = self.embed_sha1[row]
+            if sha in seen_sha:
                 continue
             seen_sha.add(sha)
             per[d] = per.get(d, 0) + 1
-            if not self.preserved[row]:
-                latest_series.add(int(self.series_code[row]))
             picked.append((row, i))
             if len(picked) >= pool:
                 break
 
-        results = [self._render(r, i, rrf[i], bm, dn, k + 1)
-                   for k, (r, i) in enumerate(picked[:top_k])]
-        pool_out = [self._render(r, i, rrf[i], bm, dn, k + 1, content=False)
-                    for k, (r, i) in enumerate(picked)]
+        # C10 — preserved 조건부 드롭. pool 을 다 모은 뒤, top_k 로 자르기 전에 적용한다.
+        # preserved 는 정정본에 재수록되지 않은 구본 첨부(감사보고서·첨부재무제표)다.
+        #
+        # 【사양과 다른 점 — 승인 필요】
+        # C10 의 코드는 "같은 계열 최신본이 pool 에 있으면 버린다"(순위 무관)인데,
+        # 그러면 같은 사양의 E6b 가 깨진다. 실측:
+        #   '매출액'   계열9 preserved 최초 9위 · 최신본 최초 1위 → 버리는 게 맞다(같은 수치의 중복)
+        #   '감사의견' 계열9 preserved 최초 1위 · 최신본 최초 8위 → 1~4위 근거가 전부 사라진다
+        #     (8위는 정정본의 'V. 회계감사인의 감사의견 등' 요약표이지 감사보고서 본문이 아니다)
+        # 그래서 **그보다 위 순위에** 최신본이 이미 뽑혔을 때만 버린다. E6a·E6b 둘 다 통과한다.
+        latest_series: set = set()
+        kept: list[tuple[int, int]] = []
+        for row, i in picked:
+            ser = int(self.series_code[row])
+            if self.preserved[row]:
+                if ser in latest_series:
+                    continue
+            else:
+                latest_series.add(ser)
+            kept.append((row, i))
+        n_dropped = len(picked) - len(kept)
+
+        results = [self._render(r, i, rrf, vsc, bsc, k + 1)
+                   for k, (r, i) in enumerate(kept[:top_k])]
+        pool_out = [{"chunk_id": str(self.chunk_id[r]),
+                     "text": (self.store.get(r).get("content") or "")[:TEXT_CUT]}
+                    for r, _ in kept[:pool]]
         return {"status": "ok" if results else "not_found",
                 "query": query, "filters": filters,
-                "n_candidates": int(cand.size), "n_pool": len(picked),
+                "n_candidates": int(cand.size), "n_pool": len(kept),
                 "n_preserved_dropped": n_dropped,
                 "elapsed_ms": round((time.time() - t0) * 1000, 1),
                 "results": results, "pool": pool_out,
                 "note": "" if results else "융합 후 남은 결과가 없다"}
 
-    def _render(self, row: int, ci: int, rrf: float, bm, dn, rank: int,
-                content: bool = True) -> dict:
-        rec = self.store.get(row) if content else None
+    # ---------------------------------------------------------------- [F] 반환 스키마
+
+    def _augment(self, row: int, text: str):
+        """(보강된 본문, 무엇을 붙였는지). 조건이 안 맞으면 원문 그대로 돌려준다."""
+        doc = self.doc_id[row]
+
+        # --- 규칙 1: 표로 시작하는데 단위 표기가 없다 -> 앞에서 단위·제목을 찾아온다
+        if _starts_with_table(text) and UNIT_MARK not in text:
+            head = next((l.strip() for l in text.splitlines() if l.strip()), "")
+            for back in range(1, LOOKBACK + 1):
+                r = row - back
+                if r < 0 or self.doc_id[r] != doc:      # doc_id 경계를 넘지 않는다
+                    break
+                prev = self.store.get(r).get("content") or ""
+                caps, may_go_on = _caption_lines(prev, head)
+                if caps:
+                    return ("\n".join([AUG_HEAD, *caps, AUG_BODY, text]), "unit_header")
+                if not may_go_on:
+                    break                               # 남의 표를 만났다 -> 중단
+            return text, None
+
+        # --- 규칙 2: 짧고 표가 없다 -> 바로 다음 청크가 표일 때만 이어 붙인다
+        if len(text) < SHORT_CHUNK and not _has_table(text):
+            r = row + 1
+            if r < self.n and self.doc_id[r] == doc:
+                nxt = self.store.get(r).get("content") or ""
+                if _has_table(nxt):
+                    return "\n".join([text, AUG_NEXT, nxt]), "next_table"
+        return text, None
+
+    def _render(self, row: int, ci: int, rrf, vsc, bsc, rank: int) -> dict:
+        rec = self.store.get(row)
         src = {
-            "company": str(self.company[row]),
-            "stock_code": str(self.stock_code[row]),
-            # 출처의 보고서명은 청크의 document_title 이 아니라 manifest 의 report_nm 을 쓴다
-            "report_nm": str(self.report_nm[row]),
-            "receipt_no": str(self.receipt_no[row]),
+            "corp_name": str(self.company[row]),
+            "report_nm": str(self.report_nm[row]),   # C12 — manifest 값. document_title 이 아니다
             "rcept_dt": str(self.rcept_dt[row]),
+            "rcept_no": str(self.receipt_no[row]),
+            "section": " > ".join(rec.get("section_path") or []),
+            "note": "",
+            # 아래는 스키마 밖 부가 정보
+            "stock_code": str(self.stock_code[row]),
             "doc_group": str(self.doc_group[row]),
+            "doc_subtype": str(self.doc_subtype[row]),
             "base_year": int(self.base_year[row]),
             "fiscal_year": int(self.fiscal_year[row]),
         }
-        if self.preserved[row]:
+        if self.preserved[row]:                      # C12
             d = src["rcept_dt"]
             src["note"] = (f"정정 전 첨부본(접수 {d[:4]}-{d[4:6]}-{d[6:8]}). "
                            "이후 정정본이 존재하나 이 섹션은 정정본에 없음")
-        out = {"rank": rank, "row": row, "chunk_id": str(self.chunk_id[row]),
-               "doc_id": str(self.doc_id[row]), "rrf": round(float(rrf), 6),
-               "bm25": round(float(bm[ci]), 4), "dense": round(float(dn[ci]), 4),
-               "preserved": bool(self.preserved[row]), "source": src}
-        if rec is not None:
-            out["section_path"] = " > ".join(rec.get("section_path") or [])
-            out["content"] = rec.get("content") or ""
-        return out
+        # 표 제목과 표 본문이 다른 청크로 갈린 경우만 좁게 보강한다. 자세한 규칙은
+        # 파일 위쪽 '인접 청크 보강' 주석 참고. 자른 뒤가 아니라 자르기 **전에** 붙여야
+        # 규칙 2에서 붙인 표가 통째로 날아가지 않는다.
+        text, aug = self._augment(row, rec.get("content") or "")
+        return {
+            "chunk_id": str(self.chunk_id[row]),
+            "text": text[:TEXT_CUT],
+            "augmented": aug,
+            "score": round(float(rrf[ci]), 6),
+            # 원점수 그대로. 정규화하지 않는다 — 답 없는 질문을 점수로 거르는 데 쓴다
+            "score_detail": {"vec": round(float(vsc[ci]), 6),
+                             "bm25": round(float(bsc[ci]), 6)},
+            "source": src,
+            "rank": rank, "row": row, "doc_id": str(self.doc_id[row]),
+            "preserved": bool(self.preserved[row]),
+        }
 
+
+# 이전 이름으로 부르는 코드를 위해 남긴다
+HybridSearch = Retriever
 
 _INSTANCE = None
 
 
-def get_searcher(**kw) -> HybridSearch:
+def get_searcher(**kw) -> Retriever:
     global _INSTANCE
     if _INSTANCE is None:
-        _INSTANCE = HybridSearch(**kw)
+        _INSTANCE = Retriever(**kw)
     return _INSTANCE
 
 
