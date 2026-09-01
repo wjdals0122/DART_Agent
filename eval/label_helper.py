@@ -87,7 +87,7 @@ TOP_K = 20
 # 독점하지 못하게 하려는 것인데, 라벨링에서는 그 상한이 걸리면 top-20 을 보여준다고
 # 해놓고 실제로는 몇 개만 보여주게 된다. 여기서는 푼다.
 PREVIEW = 200                        # content 미리보기 글자 수
-GREP_MAX_HITS = 12                   # grep 결과를 몇 개까지 찍을지
+GREP_MAX_HITS = 20                   # grep 결과를 몇 개까지 찍을지
 BAR = "─" * 78
 
 _RCEPT = re.compile(r"\b(\d{14})\b")
@@ -486,8 +486,8 @@ def show_hits(res: dict) -> list:
     return hits
 
 
-def grep_company(rt, stock_code, needles, rcept_hint=()) -> None:
-    """검색기를 거치지 않고 그 회사의 원문을 직접 훑는다.
+def grep_company(rt, stock_code, needles, rcept_hint=()) -> list:
+    """검색기를 거치지 않고 그 회사의 원문을 직접 훑는다. 찾은 청크 목록을 돌려준다.
 
     이게 없으면 '검색기가 top-20 에 올려준 것' 중에서만 정답을 고르게 되고,
     정답이 코퍼스에 있는데 못 찾은 경우를 사람이 확인할 방법이 없다.
@@ -498,7 +498,7 @@ def grep_company(rt, stock_code, needles, rcept_hint=()) -> None:
 
     want = set()
     for n in needles:
-        n = n.strip()
+        n = str(n).strip()
         if not n:
             continue
         want.add(n)
@@ -510,37 +510,52 @@ def grep_company(rt, stock_code, needles, rcept_hint=()) -> None:
                 want.add(f"{int(head):,}" + (f".{tail}" if tail else ""))
     if not want:
         print("[grep] 찾을 문자열이 없다")
-        return
+        return []
 
     rows = np.flatnonzero((rt.stock_code == stock_code) & rt.is_latest)
-    print(f"[grep] {len(rows):,}개 청크에서 {sorted(want)} 를 찾는다 (최신본만)")
+    print(f"\n[grep] {len(rows):,}개 청크에서 {sorted(want)} 를 찾는다 (최신본만)")
     t0 = time.time()
-    n = 0
+    found = []
     for row in rows:
         rec = rt.store.get(int(row))
         content = rec.get("content") or ""
         got = [x for x in want if x in content]
         if not got:
             continue
-        n += 1
-        if n <= GREP_MAX_HITS:
-            no = str(rt.receipt_no[row])
-            mark = " ←doc_info" if no in rcept_hint else ""
-            pos = content.find(got[0])
-            print(f"  {rec.get('chunk_id')}  [{rt.doc_group[row]} · {no}{mark}]")
-            print(f"    § {' > '.join(rec.get('section_path') or [])}")
-            print(f"    …{_WS.sub(' ', content[max(0, pos - 60):pos + 140])}…")
-    extra = f" (앞 {GREP_MAX_HITS}개만 표시)" if n > GREP_MAX_HITS else ""
-    print(f"[grep] {n}개 청크에서 발견{extra} · {time.time() - t0:.1f}초"
-          if n else f"[grep] 이 회사 문서에 없다 · {time.time() - t0:.1f}초")
+        pos = content.find(got[0])
+        found.append({
+            "chunk_id": str(rec.get("chunk_id")), "row": int(row),
+            "doc_group": str(rt.doc_group[row]), "rcept_no": str(rt.receipt_no[row]),
+            "report_nm": str(rt.report_nm[row]),
+            "section": " > ".join(rec.get("section_path") or []),
+            "snippet": _WS.sub(" ", content[max(0, pos - 60):pos + 140]),
+            "hit": got[0],
+        })
+    for i, f in enumerate(found[:GREP_MAX_HITS]):
+        mark = " ←doc_info" if f["rcept_no"] in rcept_hint else ""
+        print(f"[g{i:>2}] {f['doc_group']} · {f['report_nm']} · {f['rcept_no']}{mark}"
+              f"  ({f['hit']})")
+        print(f"      {f['chunk_id']}")
+        print(f"      § {f['section']}")
+        print(f"      …{f['snippet']}…")
+    if not found:
+        print(f"[grep] 이 회사 문서에 없다 · {time.time() - t0:.1f}초")
+    else:
+        extra = f" (앞 {GREP_MAX_HITS}개만 표시)" if len(found) > GREP_MAX_HITS else ""
+        print(f"[grep] {len(found)}개 청크에서 발견{extra} · {time.time() - t0:.1f}초")
+        print("       정답이면 'gs 0' 또는 'gs 0,2' 로 기록한다")
+    return found
 
 
-HELP = """  0 또는 0,3   정답 청크 번호(여러 개 가능)      n  top-20 안에 정답 없음
-  g            ground_truth 의 숫자를 전부 원문에서 찾는다
-  g <문자열>   그 문자열을 원문에서 찾는다(콤마 유무 모두 시도)
-  e            검색어를 직접 입력해 재검색            s  보류(나중에 다시)
-  a            정답(ground_truth) 다시 보기          ?  도움말
-  q            저장하고 종료"""
+HELP = """  0 또는 0,3     위 검색 결과 번호를 정답으로 기록
+  gs 0 / gs 0,2  g 결과([g0][g1]…) 번호를 정답으로 기록
+  <chunk_id>     청크 id 를 직접 붙여넣어 정답으로 기록
+  n              top-20 안에 정답 없음        s  보류(나중에 다시)
+  g              ground_truth 의 숫자를 전부 원문에서 찾는다
+  g <문자열>     그 문자열을 원문에서 찾는다(콤마 유무 모두 시도)
+  e              검색어를 직접 입력해 재검색   r  화면 다시 그리기(재검색)
+  a              질문·정답 다시 보기          ?  도움말
+  q              저장하고 종료"""
 
 
 def label(dry_run=False) -> int:
@@ -555,6 +570,33 @@ def label(dry_run=False) -> int:
     from src.search.aliases import resolve_company
     from src.search.hybrid import Retriever
     rt = Retriever()
+    row_of: dict = {}          # chunk_id -> row. 처음 쓸 때 한 번만 만든다
+
+    def lookup(cid: str):
+        """붙여넣은 chunk_id 가 실제 청크인지 확인하고 (row, doc_group) 을 준다."""
+        if not row_of:
+            row_of.update({str(c): i for i, c in enumerate(rt.chunk_id)})
+        r = row_of.get(cid)
+        return None if r is None else (r, str(rt.doc_group[r]))
+
+    def show_question(t, query):
+        print(f"\n{chr(61) * 78}")
+        print(f"[{t['n']}/{len(todo)}] {t['corp']} · {t['type']} · {t.get('sector')}")
+        print(f"{chr(61) * 78}")
+        print("질문:")
+        for line in _wrap(t["question"]):
+            print("  " + line)
+        print("\n정답(ground_truth):")
+        for line in _wrap(t["ground_truth"]):
+            print("  " + line)
+        if t.get("doc_info"):
+            print("\ndoc_info(참고, 필터로는 안 씀):")
+            for line in _wrap(t["doc_info"]):
+                print("  " + line)
+        print(f"\n검색어(변환): {query}")
+        if query != t["search_query"]:
+            print(f"  (원래 변환값: {t['search_query']})")
+        print(BAR)
 
     queue = list(pending)
     deferred = []
@@ -564,32 +606,24 @@ def label(dry_run=False) -> int:
         query = t["search_query"]
         card = resolve_company(t["corp"])
         stock = card.get("stock_code")
+        hits: list = []
+        grep_hits: list = []
+        redraw = True          # **명령이 화면을 다시 그릴지 여기서만 정한다.**
+        # 예전에는 모든 명령이 loop 처음으로 돌아가 재검색 + 전체 재출력을 했다.
+        # 그래서 g 결과가 찍히자마자 질문 60줄에 밀려 화면 밖으로 사라졌고,
+        # 사용자에게는 "g 가 안 먹고 검색 결과만 다시 뜬다" 로 보였다.
         while True:
-            print(f"\n{'=' * 78}")
-            print(f"[{t['n']}/{len(todo)}] {t['corp']} · {t['type']} · {t.get('sector')}")
-            print(f"{'=' * 78}")
-            print("질문:")
-            for line in _wrap(t["question"]):
-                print("  " + line)
-            print("\n정답(ground_truth):")
-            for line in _wrap(t["ground_truth"]):
-                print("  " + line)
-            if t.get("doc_info"):
-                print("\ndoc_info(참고, 필터로는 안 씀):")
-                for line in _wrap(t["doc_info"]):
-                    print("  " + line)
-            print(f"\n검색어(변환): {query}")
-            if query != t["search_query"]:
-                print(f"  (원래 변환값: {t['search_query']})")
-            print(BAR)
-            t0 = time.time()
-            res = rt.search(query, corp_name=t["corp"], top_k=TOP_K,
-                            pool=max(TOP_K, 50), per_doc=TOP_K)
-            hits = show_hits(res)
-            print(f"(검색 {time.time() - t0:.2f}초)")
-            if dry_run:
-                print("\n--dry-run 이라 여기서 멈춘다. 라벨은 기록하지 않았다.")
-                return 0
+            if redraw:
+                show_question(t, query)
+                t0 = time.time()
+                res = rt.search(query, corp_name=t["corp"], top_k=TOP_K,
+                                pool=max(TOP_K, 50), per_doc=TOP_K)
+                hits = show_hits(res)
+                print(f"(검색 {time.time() - t0:.2f}초)")
+                redraw = False
+                if dry_run:
+                    print("\n--dry-run 이라 여기서 멈춘다. 라벨은 기록하지 않았다.")
+                    return 0
             print(HELP)
             try:
                 cmd = input("입력> ").strip()
@@ -597,9 +631,7 @@ def label(dry_run=False) -> int:
                 print("\n입력이 끊겼다. 저장하고 종료한다.")
                 return 0
 
-            if cmd == "?":
-                continue
-            if cmd == "a":
+            if not cmd or cmd == "?":
                 continue
             if cmd == "q":
                 print(f"\n저장하고 종료. 이번 세션에 {written}건 기록.")
@@ -607,37 +639,80 @@ def label(dry_run=False) -> int:
             if cmd == "s":
                 deferred.append(t)
                 break
+            if cmd == "r":
+                redraw = True
+                continue
+            if cmd == "a":
+                show_question(t, query)
+                print("(위 검색 결과는 그대로다. 다시 보려면 'r')")
+                continue
             if cmd == "e":
                 new = input("새 검색어> ").strip()
                 if new:
                     query = new
+                    redraw = True
+                else:
+                    print("!! 빈 검색어라 그대로 둔다")
                 continue
             if cmd == "g" or cmd.startswith("g "):
-                arg = cmd[2:].strip() if len(cmd) > 1 else ""
-                needles = ([arg] if arg
-                           else _NUMBER.findall(t["ground_truth"] or ""))
+                arg = cmd[1:].strip()
+                needles = [arg] if arg else _NUMBER.findall(t["ground_truth"] or "")
                 if not stock:
                     print(f"[grep] 회사명을 못 풀었다: {card.get('status')}")
                 else:
-                    grep_company(rt, stock, needles, set(t.get("rcept_nos") or ()))
-                continue
+                    grep_hits = grep_company(rt, stock, needles,
+                                             set(t.get("rcept_nos") or ()))
+                continue                      # 화면을 다시 그리지 않는다
             if cmd == "n":
                 _write(t, query, [], [], ["not_in_top20"], "")
                 written += 1
+                print("기록: top-20 안에 정답 없음")
                 break
-            ids = _parse_ids(cmd, len(hits))
-            if ids is None:
-                print("!! 알 수 없는 입력. '?' 로 도움말")
+
+            # --- 정답 기록 세 가지 경로 ---
+            gold, groups, extra_tags = None, [], []
+
+            if cmd.startswith("gs"):
+                if not grep_hits:
+                    print("!! g 결과가 없다. 먼저 'g' 로 찾아라")
+                    continue
+                ids = _parse_ids(cmd[2:].strip(), len(grep_hits))
+                if ids is None:
+                    continue
+                gold = [grep_hits[i]["chunk_id"] for i in ids]
+                groups = sorted({grep_hits[i]["doc_group"] for i in ids
+                                 if grep_hits[i]["doc_group"]})
+                extra_tags = ["found_by_grep"]
+            elif re.fullmatch(r"[0-9]+(\s*,\s*[0-9]+)*", cmd):
+                ids = _parse_ids(cmd, len(hits))
+                if ids is None:
+                    continue
+                gold = [hits[i]["chunk_id"] for i in ids]
+                # 공시그룹은 문항이 아니라 **사람이 고른 청크가 실제로 있던 공시**에서 온다
+                groups = sorted({(hits[i].get("source") or {}).get("doc_group")
+                                 for i in ids
+                                 if (hits[i].get("source") or {}).get("doc_group")})
+            elif ":" in cmd:
+                cids = [c.strip() for c in cmd.split(",") if c.strip()]
+                bad = [c for c in cids if lookup(c) is None]
+                if bad:
+                    print(f"!! 코퍼스에 없는 chunk_id: {bad}")
+                    continue
+                gold = cids
+                groups = sorted({lookup(c)[1] for c in cids})
+                # g 결과에서 복사해 붙였을 수 있으니, 거기 있던 id 면 표시를 남긴다
+                if any(c in {h['chunk_id'] for h in grep_hits} for c in cids):
+                    extra_tags = ["found_by_grep"]
+            else:
+                print(f"!! 알 수 없는 입력: {cmd!r} — '?' 로 도움말")
                 continue
-            gold = [hits[i]["chunk_id"] for i in ids]
-            # 공시그룹은 문항이 아니라 **사람이 고른 청크가 실제로 있던 공시**에서 온다
-            groups = sorted({(hits[i].get("source") or {}).get("doc_group")
-                             for i in ids if (hits[i].get("source") or {}).get("doc_group")})
+
             note = input("메모(없으면 엔터)> ").strip()
-            tags = ["edited_query"] if query != t["search_query"] else []
+            tags = extra_tags + (["edited_query"] if query != t["search_query"] else [])
             _write(t, query, gold, groups, tags, note)
             written += 1
-            print(f"기록: {gold} · 공시그룹 {groups}")
+            print(f"기록: {gold} · 공시그룹 {groups}"
+                  + (f" · {tags}" if tags else ""))
             break
 
     if deferred:
@@ -648,6 +723,7 @@ def label(dry_run=False) -> int:
 
 def _parse_ids(cmd: str, n: int):
     if not cmd or not re.fullmatch(r"\d+(\s*,\s*\d+)*", cmd):
+        print(f"!! 번호가 아니다: {cmd!r}")
         return None
     ids = [int(x) for x in cmd.split(",")]
     if any(i < 0 or i >= n for i in ids):
