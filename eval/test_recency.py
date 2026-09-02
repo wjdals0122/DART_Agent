@@ -124,8 +124,9 @@ def main() -> int:
     check("코퍼스 범위 밖 연도는 not_found + 범위 안내",
           r["status"] == "not_found" and "범위 밖" in r["note"])
     r = TOOLS["list_disclosures"](corp_name="HD현대중공업", series_of="20230310000001")
-    check("없는 접수번호는 error + 목록 조회 안내",
-          r["status"] == "error" and "추측하지 말고" in r["note"])
+    check("없는 접수번호는 error + 다음에 뭘 할지 안내",
+          r["status"] == "error" and "추측하지 마" in r["note"]
+          and "search_disclosure(query=" in r["note"], r["note"][:80])
     r = TOOLS["list_disclosures"](corp_name="HD현대일렉트릭", series_of="2024013000001")
     check("14자리가 아니면 형식 오류를 밝힌다",
           r["status"] == "error" and "형식이 틀렸다" in r["note"])
@@ -153,8 +154,9 @@ def main() -> int:
                                   date_from="20250101", date_to="20251231", limit=3)
     check("기간으로 좁히면 exchange 도 나온다", r["status"] == "ok" and r["total"] > 0,
           f"total={r['total']}")
-    check("성공 응답에 '내용을 보려면 search_disclosure' 안내가 붙는다",
-          "search_disclosure(rcept_no=" in r["note"])
+    check("성공 응답에 '목록은 내용이 아니다' 안내가 붙는다",
+          "내용이 아니다" in r["note"] and "search_disclosure(query=" in r["note"],
+          r["note"][-80:])
     r = TOOLS["list_disclosures"](corp_name="LG이노텍", doc_group="periodic",
                                   fiscal_year=2025, limit=3)
     check("periodic + fiscal_year 는 그대로 동작한다(회귀)",

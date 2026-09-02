@@ -90,6 +90,18 @@ FORCE_TOOL = (
     "그때 '공시에서 확인되지 않음'이라고 답한다."
 )
 
+# 목록은 메타데이터라서 금액·사유·진행 상태의 근거가 될 수 없다. 목록만 받은 뒤
+# 본문 내용까지 답하려는 경로를 한 번 되돌린다. 순수 건수·비중 질문이라면 모델이
+# "목록만으로 충분하다"고 판단해 같은 답을 내도 다음 턴에는 그대로 받는다.
+LIST_ONLY_NUDGE = (
+    "목록은 문서 내용의 근거가 아니다. 질문이 공시 건수·유형·접수일 같은 "
+    "목록 메타데이터만 묻는지 다시 확인하라. 금액·사유·정정 내용·진행 상태를 "
+    "하나라도 묻는다면, 접수번호를 하나씩 대입하지 말고 질문의 사건명·계약명·"
+    "항목명 같은 고유어로 search_disclosure 를 호출해 본문 검색이 관련 문서를 "
+    "고르게 하라. 시점은 date_from/date_to, 종류는 doc_group 으로 좁혀라. "
+    "목록 메타데이터만으로 답이 완결되면 도구 없이 답변 본문만 다시 출력하라."
+)
+
 # 도구를 한 번도 안 부르고 바로 답하려는 경우에만 한 번 더 던지는 검토 지시.
 # 거절 답변에 '공개되지 않을 가능성이 높습니다', '관련 기관에 문의하세요' 같은
 # 공시 근거 없는 일반 지식이 붙는 걸 막는다. 시스템 프롬프트에 같은 규칙을 넣어
@@ -322,7 +334,8 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
            "waste": {"repeat_blocked": 0, "retry_after_bad": 0,
                      "hit_call_limit": False, "http_retry": 0, "retry_429": 0,
                      "retry_wait_s": 0.0, "resent_prompt_tokens_est": 0,
-                     "no_tool_nudge": False, "answered_without_tools": False},
+                     "no_tool_nudge": False, "list_only_nudge": False,
+                     "answered_without_tools": False},
            "stopped_by_budget": False, "unsourced_claim": False}
     try:
         out = _run(question, out, t0, model, max_tool_calls, deadline, verbose, qid)
@@ -399,6 +412,7 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
     reminded = False           # 리마인더는 딱 한 번만 넣는다
     reviewed = False           # 도구 없이 답하는 경로의 검토도 딱 한 번만
     nudged = False             # 조회 없이 답하려는 것을 되돌리는 지시도 한 번만
+    list_only_nudged = False   # 목록만 보고 본문에 답하려는 경로도 한 번만
     bad_tools: set = set()     # 직전 턴에 error/not_found 를 돌려준 도구 이름
 
     while True:
@@ -440,6 +454,19 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
                     reviewed = True
                     msgs.append({"role": "assistant", "content": text})
                     msgs.append({"role": "user", "content": REVIEW})
+                    continue
+            # list_disclosures 는 문서 제목·접수일·건수만 준다. 성공한 본문 검색이
+            # 하나도 없는데 답하려 하면 한 번 되돌려 목록→본문 단절을 막는다.
+            if extra is not None and out["tool_calls"] and not list_only_nudged:
+                listed = any(c["name"] == "list_disclosures" and c["status"] == "ok"
+                             for c in out["tool_calls"])
+                searched = any(c["name"] == "search_disclosure" and c["status"] == "ok"
+                               for c in out["tool_calls"])
+                if listed and not searched:
+                    list_only_nudged = True
+                    out["waste"]["list_only_nudge"] = True
+                    msgs.append({"role": "assistant", "content": text})
+                    msgs.append({"role": "user", "content": LIST_ONLY_NUDGE})
                     continue
             out["answer"] = text
             if not out["tool_calls"]:

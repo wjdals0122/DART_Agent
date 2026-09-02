@@ -78,8 +78,8 @@ EMPTY_QUERY_NOTE = (
 
 
 def _search_disclosure(query=None, corp_name=None, fiscal_year=None, rcept_no=None,
-                       rcept_dt=None, doc_group=None, report_type=None, top_k=5,
-                       include_superseded=False) -> dict:
+                       rcept_dt=None, date_from=None, date_to=None, doc_group=None,
+                       report_type=None, top_k=5, include_superseded=False) -> dict:
     """기존 Retriever 를 그대로 부른다. 인덱스가 무거우므로 여기서 늦게 임포트한다."""
     from src.search.hybrid import get_searcher
 
@@ -99,6 +99,7 @@ def _search_disclosure(query=None, corp_name=None, fiscal_year=None, rcept_no=No
         k = 5
     res = get_searcher().search(str(query), corp_name=corp_name, fiscal_year=fiscal_year,
                                 rcept_no=rcept_no, rcept_dt=rcept_dt, doc_group=doc_group,
+                                rcept_dt_from=date_from, rcept_dt_to=date_to,
                                 report_type=report_type,
                                 top_k=k, include_superseded=bool(include_superseded))
     res.pop("pool", None)                      # LLM 에게 줄 것이 아니다

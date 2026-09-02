@@ -42,6 +42,38 @@ def main() -> int:
     ap.add_argument("--search", action="store_true", help="search_disclosure 까지 검증")
     a = ap.parse_args()
 
+    schema = json.loads((ROOT / "config" / "tools.json").read_text(encoding="utf-8"))
+    search_schema = next(t["function"] for t in schema["tools"]
+                         if t["function"]["name"] == "search_disclosure")
+    props = search_schema["parameters"]["properties"]
+    check("search_disclosure date_from 스키마", "date_from" in props)
+    check("search_disclosure date_to 스키마", "date_to" in props)
+
+    # 실제 인덱스를 올리지 않고 공개 인자→Retriever 인자 전달만 검증한다.
+    import src.search.hybrid as hybrid
+    real_get_searcher = hybrid.get_searcher
+
+    class SpySearcher:
+        called = {}
+
+        def search(self, query, **kw):
+            self.called = {"query": query, **kw}
+            return {"status": "ok", "results": [], "pool": [], "note": ""}
+
+    spy = SpySearcher()
+    hybrid.get_searcher = lambda: spy
+    try:
+        out = TOOLS["search_disclosure"](
+            query="계약금액", corp_name="삼성전자",
+            date_from="20240130", date_to="20250225")
+    finally:
+        hybrid.get_searcher = real_get_searcher
+    check("date_from → rcept_dt_from 전달",
+          spy.called.get("rcept_dt_from") == "20240130", str(spy.called))
+    check("date_to → rcept_dt_to 전달",
+          spy.called.get("rcept_dt_to") == "20250225", str(spy.called))
+    check("날짜 범위 호출 모양 정상", shape_ok(out), str(out))
+
     names = list(TOOLS)
     if not a.search:
         names = [n for n in names if n != "search_disclosure"]

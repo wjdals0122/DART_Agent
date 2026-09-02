@@ -164,6 +164,39 @@ def main() -> int:
           str([(c["name"], c["status"]) for c in r["tool_calls"]]))
     clova.chat = real_chat
 
+    # ---------- 7. 목록만 보고 내용에 답하려 하면 본문 검색으로 되돌린다
+    print("\n--- 7. 목록만 보고 답하려는 경우 ---")
+    seq3 = {"n": 0}
+
+    def chat_list_only(messages, **kw):
+        seq3["n"] += 1
+        if seq3["n"] == 1:
+            return {"ok": True, "text": "", "tool_calls": [
+                fake_call(1, "list_disclosures", {"corp_name": "삼성전자"})],
+                "finish_reason": "tool_calls", "usage": {}}
+        if seq3["n"] == 2:
+            return {"ok": True, "text": "목록만 본 답", "tool_calls": [],
+                    "finish_reason": "stop", "usage": {}}
+        if seq3["n"] == 3:
+            return {"ok": True, "text": "", "tool_calls": [fake_call(2)],
+                    "finish_reason": "tool_calls", "usage": {}}
+        return {"ok": True, "text": "본문을 본 답", "tool_calls": [],
+                "finish_reason": "stop", "usage": {}}
+
+    def list_or_search(**kw):
+        src = [] if "query" not in kw else ["[삼성전자 공시, 접수번호 20240101000001]"]
+        return {"status": "ok", "results": [], "sources": src, "note": ""}
+
+    T.TOOLS = {k: list_or_search for k in real_tools}
+    clova.chat = chat_list_only
+    r = answer("계약금액은?", max_tool_calls=4)
+    check("목록 뒤 본문 검색 강제",
+          [c["name"] for c in r["tool_calls"]] ==
+          ["list_disclosures", "search_disclosure"])
+    check("목록 전용 답변 되돌림 계측", r["waste"].get("list_only_nudge") is True)
+    T.TOOLS = real_tools
+    clova.chat = real_chat
+
     print()
     print("실패 없음" if not FAIL else "실패: " + ", ".join(FAIL))
     return 1 if FAIL else 0

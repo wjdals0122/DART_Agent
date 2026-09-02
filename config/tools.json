@@ -11,7 +11,7 @@
           "properties": {
             "query": {
               "type": "string",
-              "description": "찾을 내용. 공시 원문에 쓰이는 표현으로. 회사명·연도·날짜는 넣지 말 것. 예: '연결 손익계산서 매출액 매출원가 영업이익', '자기주식 취득 신탁계약 계약금액'"
+              "description": "찾을 내용. 공시 원문에 쓰이는 표현으로. 회사명·연도·날짜는 넣지 말 것. 특정 사건은 계약명·상대방·품목 같은 고유어를 넣고 rcept_no 없이 검색해 관련 문서를 고르게 한다. 예: '연결 손익계산서 매출액 매출원가 영업이익', 'MGC 2척 계약금액 공시내용 진행 변경사항'"
             },
             "corp_name": {
               "type": "string",
@@ -23,11 +23,19 @@
             },
             "rcept_no": {
               "type": "string",
-              "description": "접수번호 14자리. 질문에 있으면 반드시 넣는다. 문서를 하나로 특정하는 가장 강한 조건이다"
+              "description": "접수번호 14자리. 질문에 직접 주어졌거나 앞선 검색 결과로 맞는 문서임을 확인한 경우에만 넣는다. 날짜나 목록을 보고 추측하거나, 같은 query에 번호만 바꿔 여러 번 호출하지 않는다"
             },
             "rcept_dt": {
               "type": "string",
               "description": "접수일 8자리 YYYYMMDD. 질문에 있으면 반드시 넣는다"
+            },
+            "date_from": {
+              "type": "string",
+              "description": "검색할 접수일 시작 YYYYMMDD(포함). 특정 사건의 최초일이나 조회 기간이 주어졌을 때 쓴다"
+            },
+            "date_to": {
+              "type": "string",
+              "description": "검색할 접수일 끝 YYYYMMDD(포함). 사건 이후의 정정·변경 공시를 찾을 때 date_from과 함께 쓴다"
             },
             "doc_group": {
               "type": "string",
@@ -45,7 +53,7 @@
             },
             "include_superseded": {
               "type": "boolean",
-              "description": "기본 false. 정정으로 밀려난 옛 보고서까지 포함할지. 정정 전후를 비교하는 질문에서만 true 로 한다. 평소에 true 로 두면 같은 내용의 옛 판이 결과를 채운다"
+              "description": "기본 false. 정정으로 밀려난 옛 보고서까지 포함할지. 정정·변경·후속 이력을 추적하거나 정정 전후를 비교하는 질문에서 true 로 한다. 평소에 true 로 두면 같은 내용의 옛 판이 결과를 채운다"
             }
           },
           "required": ["query"]

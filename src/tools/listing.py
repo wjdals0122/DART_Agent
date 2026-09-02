@@ -53,10 +53,18 @@ ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "corpus" / "manifest.jsonl"
 MAX_LIMIT = 500
 RCEPT_LEN = 14
-FIX_HINT = ("접수번호를 추측하지 말고 list_disclosures(corp_name=...) 로 "
-            "먼저 목록을 조회해 실제 접수번호를 확인하라")
-NEXT_HINT = ("이것은 문서 목록이며 내용이 아니다. 내용을 확인하려면 results 에서 "
-             "rcept_no 를 골라 search_disclosure(rcept_no=..., query=...) 를 호출하라")
+FIX_HINT = (
+    "접수번호를 추측하지 마라. 질문에 사건명·계약명·항목명 같은 고유어가 있으면 "
+    "search_disclosure(query=..., corp_name=..., date_from=..., date_to=...) 를 "
+    "rcept_no 없이 호출해 본문 검색이 관련 문서를 고르게 하라. 접수번호 목록 자체가 "
+    "필요할 때만 list_disclosures(corp_name=...) 를 호출하라"
+)
+NEXT_HINT = (
+    "이것은 문서 목록이며 내용이 아니다. 사건명·계약명·항목명 같은 고유어가 질문에 "
+    "있으면 접수번호를 하나씩 대입하지 말고 search_disclosure(query=..., corp_name=..., "
+    "date_from=..., date_to=..., doc_group=...) 로 전체 본문을 검색해 관련 문서를 고르게 "
+    "하라. rcept_no 는 검색 결과로 맞는 문서를 확인한 뒤 그 문서 안을 다시 찾을 때만 쓴다"
+)
 
 _DOCS = None
 _SERIES_MAX = None

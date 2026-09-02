@@ -593,6 +593,7 @@ def report(rows: list, budget, run_name: str, pf: dict) -> str:
         ww = r.get("waste") or {}
         w["repeat_blocked"] += ww.get("repeat_blocked", 0)
         w["retry_after_bad"] += ww.get("retry_after_bad", 0)
+        w["list_only_nudge"] += 1 if ww.get("list_only_nudge") else 0
         w["hit_call_limit"] += 1 if ww.get("hit_call_limit") else 0
         w["retry_429"] += ww.get("retry_429", 0)
         w["http_retry"] += ww.get("http_retry", 0)
@@ -604,6 +605,8 @@ def report(rows: list, budget, run_name: str, pf: dict) -> str:
           f"많으면 모델이 검색어를 안 바꾸는 것 |",
           f"| error/not_found 뒤 재시도 | {w['retry_after_bad']} | 스스로 고쳐 다시 불렀다. "
           f"많으면 첫 시도의 검색어·필터가 나쁘다 |",
+          f"| 목록만 보고 답하려다 본문 검색으로 복귀 | {w['list_only_nudge']} | "
+          f"내용 질문에서 list_disclosures 만 보고 답하려 한 횟수 |",
           f"| 도구 6회 한도 도달 문항 | {w['hit_call_limit']}/{len(rows)} | "
           f"많으면 계획이 헤맨다 |",
           f"| 429 재시도 | {w['retry_429']} | 대기 {w['retry_wait_s']:,.0f}초. "
@@ -674,6 +677,7 @@ def report(rows: list, budget, run_name: str, pf: dict) -> str:
     # ── [2][3][4] 수정 효과
     no_tool = [r for r in rows if (r.get("waste") or {}).get("answered_without_tools")]
     nudged = [r for r in rows if (r.get("waste") or {}).get("no_tool_nudge")]
+    list_nudged = [r for r in rows if (r.get("waste") or {}).get("list_only_nudge")]
     other = [(r["qid"], cited_other_corp(r)) for r in rows if cited_other_corp(r)]
     refus = [(r["qid"], refusal_count(r.get("answer") or "")) for r in rows
              if refusal_count(r.get("answer") or "")]
@@ -683,6 +687,7 @@ def report(rows: list, budget, run_name: str, pf: dict) -> str:
           f"| 도구 0회로 답한 문항 | **{len(no_tool)}**/{len(rows)} "
           f"{[r['qid'] for r in no_tool] if no_tool else ''} |",
           f"| 조회하라고 되돌린 문항(FORCE_TOOL) | {len(nudged)} |",
+          f"| 목록에서 본문 검색으로 되돌린 문항 | {len(list_nudged)} |",
           f"| 타사 데이터를 근거로 단 문항 | **{len(other)}** "
           f"{[q for q, _ in other] if other else ''} |",
           f"| 항목별 거절을 밝힌 문항 | {len(refus)} (총 {sum(n for _, n in refus)}회) |",
