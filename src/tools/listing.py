@@ -14,6 +14,13 @@ manifest 에 이미 다 있는 정보라 그냥 세면 된다.
 "가장 최신 보고서가 무엇인가" 라서, limit 에 잘리는 쪽은 반드시 오래된 것이어야 한다.
 `series_of` 결과만 자른 뒤에 오름차순으로 되돌린다(정정 이력은 시간순이 읽기 좋다).
 
+【접수번호를 추측하는 것을 막는다】
+e2e 40문항에서 모델이 접수번호를 **지어냈다**. 질문의 날짜에 000001 을 붙여
+조립하거나(20230310000001), 13자리를 넣거나, 시스템 프롬프트 예시에 있던
+남의 회사 번호를 그대로 베꼈다. 그때 도구는 "조건에 맞는 공시가 없다" 라고만
+답해서 모델이 무엇을 잘못했는지 알 수 없었다.
+이제 형식·존재·회사 일치를 각각 확인하고 **무엇을 어떻게 고칠지** 를 note 로 준다.
+
 【사업연도 주의】
 manifest 의 `base_year` 는 **접수 연도**다. 2024 사업연도 사업보고서는 2025년에 접수되므로
 base_year=2025 다. 사업연도로 거르려면 report_nm 의 '(2024.12)' 를 봐야 한다.
@@ -31,14 +38,19 @@ from src.search.build_latest_mask import base_report_nm
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "corpus" / "manifest.jsonl"
 MAX_LIMIT = 500
+RCEPT_LEN = 14
+FIX_HINT = ("접수번호를 추측하지 말고 list_disclosures(corp_name=...) 로 "
+            "먼저 목록을 조회해 실제 접수번호를 확인하라")
 
 _DOCS = None
 _SERIES_MAX = None
+_BY_RCEPT = None
+_FY_SPAN = None
 
 
 def _load():
     """manifest 를 한 번만 읽는다. 계열별 최신 접수번호도 같이 만들어 둔다."""
-    global _DOCS, _SERIES_MAX
+    global _DOCS, _SERIES_MAX, _BY_RCEPT, _FY_SPAN
     if _DOCS is not None:
         return _DOCS, _SERIES_MAX
     docs = []
@@ -56,8 +68,34 @@ def _load():
         k, rc = d["_series"], str(d.get("rcept_no") or "")
         if rc > smax.get(k, ""):
             smax[k] = rc
+    _BY_RCEPT = {str(d.get("rcept_no") or ""): d for d in docs}
+    # 코퍼스가 담고 있는 사업연도 범위. 상수로 박지 않고 manifest 에서 구한다 —
+    # 데이터가 바뀌면 안내 문구도 같이 바뀌어야 한다.
+    years = [d["_fy"] for d in docs if isinstance(d.get("_fy"), int) and d["_fy"] > 0]
+    _FY_SPAN = (min(years), max(years)) if years else (None, None)
     _DOCS, _SERIES_MAX = docs, smax
     return _DOCS, _SERIES_MAX
+
+
+def fiscal_span() -> tuple:
+    """코퍼스가 담고 있는 사업연도 (최소, 최대)."""
+    _load()
+    return _FY_SPAN
+
+
+def rcept_problem(value):
+    """접수번호가 쓸 수 없는 값이면 이유 문장을, 멀쩡하면 None 을 돌려준다.
+
+    search_disclosure 도 같은 검사를 쓴다 — 한 곳에서만 판단해야 안내가 갈리지 않는다.
+    """
+    _load()
+    rc = str(value).strip()
+    if not (rc.isdigit() and len(rc) == RCEPT_LEN):
+        return (f"접수번호 {rc!r} 는 형식이 틀렸다 — {RCEPT_LEN}자리 숫자여야 한다. "
+                f"{FIX_HINT}")
+    if rc not in _BY_RCEPT:
+        return f"접수번호 {rc} 이 코퍼스에 없다. {FIX_HINT}"
+    return None
 
 
 def _row(d, smax) -> dict:
@@ -93,11 +131,24 @@ def list_disclosures(corp_name=None, doc_group=None, fiscal_year=None,
     sel = docs
     if series_of:
         rc = str(series_of).strip()
-        anchor = next((d for d in docs if str(d.get("rcept_no")) == rc), None)
-        if anchor is None:
-            out["status"] = "not_found"
-            out["note"] = f"접수번호 {rc} 인 공시가 코퍼스에 없다"
+        bad = rcept_problem(rc)                          # (c) 형식·존재
+        if bad:
+            out["status"] = "error"
+            out["note"] = bad
             return out
+        anchor = _BY_RCEPT[rc]
+        if corp_name:                                    # (a) 앵커 회사가 다른가
+            from src.search.aliases import resolve_company
+            r = resolve_company(corp_name)
+            if r["status"] == "ok" and \
+                    str(anchor.get("stock_code")) != str(r["stock_code"]):
+                out["status"] = "error"
+                out["note"] = (
+                    f"series_of={rc} 는 {anchor.get('corp_name')} 의 문서다. "
+                    f"{r['corp_name']} 의 질문에는 쓸 수 없다. "
+                    f"먼저 list_disclosures(corp_name={r['corp_name']!r}) 로 "
+                    f"목록을 조회해 실제 접수번호를 확인하라")
+                return out
         sel = [d for d in docs if d["_series"] == anchor["_series"]]
         notes.append(f"계열 기준: {anchor.get('corp_name')} · {anchor['_base_nm']}")
         if anchor.get("doc_group") != "periodic":
@@ -123,6 +174,12 @@ def list_disclosures(corp_name=None, doc_group=None, fiscal_year=None,
                 years = {int(fiscal_year)}
             except (TypeError, ValueError):
                 years = {int(y) for y in fiscal_year}
+            lo, hi = fiscal_span()                       # (b) 코퍼스 범위 밖인가
+            if lo is not None and years and all(not (lo <= y <= hi) for y in years):
+                out["status"] = "not_found"
+                out["note"] = (f"코퍼스는 {lo}~{hi}년 공시만 담고 있다. "
+                               f"fiscal_year={fiscal_year} 은 범위 밖이다")
+                return out
             sel = [d for d in sel if d["_fy"] in years]
         f, t = _ymd(date_from), _ymd(date_to)
         if f:

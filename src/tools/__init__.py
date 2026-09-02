@@ -85,6 +85,14 @@ def _search_disclosure(query=None, corp_name=None, fiscal_year=None, rcept_no=No
 
     if query is None or not str(query).strip():
         return {"status": "error", "note": EMPTY_QUERY_NOTE}
+    if rcept_no:
+        # 접수번호 검증은 list_disclosures 와 **같은 함수**를 쓴다.
+        # 두 곳에서 따로 판단하면 안내가 갈리고, 모델은 갈린 안내를 못 고친다.
+        from src.tools.listing import rcept_problem
+
+        bad = rcept_problem(rcept_no)
+        if bad:
+            return {"status": "error", "note": bad, "results": [], "sources": []}
     try:
         k = max(1, min(int(top_k), MAX_TOP_K))
     except (TypeError, ValueError):

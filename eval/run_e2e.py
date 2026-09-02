@@ -22,11 +22,12 @@ HCX-005 는 입력 1,000토큰 1.25원, 출력 1,000토큰 5원이다. **출력�
 이 Agent 는 도구 결과를 프롬프트에 계속 쌓으므로 입력 토큰이 압도적으로 많지만,
 출력이 조금만 길어져도 비용은 빨리 오른다. 리포트는 둘을 따로 보여준다.
 
-【채점은 여기서 하지 않는다】
-자동 채점 방식이 아직 정해지지 않았다. 이 스크립트는 **답변과 정답을 나란히 저장**하고,
-기계적으로 셀 수 있는 것 하나만 힌트로 남긴다 — 정답에 나오는 숫자가 답변에 몇 개
-들어 있는지(`numbers_hit`). **이것은 채점이 아니다.** 서술형은 숫자가 없거나 무의미하다.
-`verdict` 는 비워 둔다. 사람이나 심판 모델이 나중에 채운다.
+【채점은 여기서 하지 않는다 — 자동 채점은 폐기했다】
+정답의 숫자가 답변에 몇 개 있는지 세는 방식을 잠정 채점으로 써 봤지만 못 쓴다.
+정답 문자열에 "※ 오답 유형: … 를 답하면 오답" 형태의 **반례 숫자**가 섞여 있어
+분모가 부풀려진다(40문항에서 일치율 0.5 초과 1건, 최고 0.857). 그래서 리포트에서
+"정확도" 를 뺐고, 기계로 틀림없이 알 수 있는 것만 센다 — 근거 확보율·도구 성적·
+타사 출처 인용·거절 횟수. 맞고 틀림은 reports/<run>_review.md 를 사람이 판정한다.
 
 【표본은 한 번 정하고 얼어붙는다 — eval/e2e_sample.jsonl】
 평가 표본이 실행할 때마다 달라지면 앞뒤 결과를 비교할 수 없다. 그래서 40문항을
@@ -282,34 +283,36 @@ def ensure_sample(items: list, n: int, seed: int, path=SAMPLE_PATH) -> tuple:
                     f"(seed={seed}). 이후 실행은 이 파일에서만 고른다"]
 
 
-# ---------------------------------------------------------------- 힌트(채점 아님)
-
-
-def numbers_hit(answer: str, ground_truth: str) -> dict:
-    """정답에 나오는 숫자가 답변에 몇 개 있는지. **채점이 아니라 힌트다.**
-
-    3자리 이상 숫자만 본다(연도·한 자리 수는 우연히 맞는다).
-    서술형은 숫자가 없으므로 total=0 이 되고, 그건 '틀렸다' 가 아니라 '못 잰다' 이다.
-    """
-    def norm(s):
-        return {m.group(0).replace(",", "") for m in _NUM.finditer(s or "")}
-
-    want = norm(ground_truth)
-    got = norm(answer)
-    hit = want & got
-    return {"total": len(want), "hit": len(hit),
-            "ratio": round(len(hit) / len(want), 3) if want else None}
-
-
-# ------------------------------------------------- 진단 (전부 기계 판정 · 잠정)
+# ------------------------------------------------- 진단 (기계로 잴 수 있는 것만)
 #
-# 아래 셋은 **채점이 아니다.** 사람이 볼 자리를 좁혀 주는 자동 분류다.
-# 서술형은 기계로 맞고 틀림을 가릴 수 없으므로 reports/e2e_review.md 로 넘긴다.
+# 【자동 채점을 폐기했다】
+# 정답의 숫자가 답변에 몇 개 있는지 세는 `numbers_hit` 을 잠정 채점으로 썼는데,
+# 40문항을 돌려 보고 못 쓴다는 것이 확정됐다. 정답 문자열에
+# "※ 오답 유형: … 를 답하면 오답" 형태의 **반례 숫자**가 잔뜩 들어 있어 분모가
+# 부풀려진다(일치율 0.5 초과 1건, 최고 0.857). 임계값 artifact 이지 성능이 아니다.
+# 그래서 이 리포트에서 "정확도" 라는 말을 뺐다. 맞고 틀림은 사람이 판정한다.
+#
+# 여기서 세는 것은 **기계가 틀림없이 알 수 있는 것**뿐이다.
+#   - 근거를 올렸는가 (근거 확보율)
+#   - 도구가 ok 였는가
+#   - 질문의 회사가 아닌 출처를 달았는가
+#   - "확인되지 않음" 을 몇 번 밝혔는가
 
 BUCKET_SEARCH = "검색"
 BUCKET_PLAN = "계획"
-BUCKET_WRITE = "작문"
-BUCKET_OK = "-"
+BUCKET_HOLD = "보류(사람)"
+
+# 정답 문자열에서 '핵심' 과 '주의사항' 을 가르는 표시. 이 앞까지가 답이고,
+# 뒤는 오답 유형·환각 방지·역질문 지침이라 판정할 때 먼저 볼 것이 아니다.
+_GT_TAIL = re.compile(r"(※|\[환각 방지\]|\[역질문)")
+
+
+def split_ground_truth(gt: str) -> tuple:
+    """(핵심, 뒤에 붙일 주의사항). 표시가 없으면 전부 핵심이다."""
+    m = _GT_TAIL.search(gt or "")
+    if not m:
+        return (gt or "").strip(), ""
+    return (gt or "")[:m.start()].strip(), (gt or "")[m.start():].strip()
 
 
 def cited_other_corp(row: dict) -> list:
@@ -319,11 +322,8 @@ def cited_other_corp(row: dict) -> list:
     앞쪽에 회사명이 온다. 별칭까지 보고 하나도 안 맞으면 타사로 센다.
     """
     names = _alias_set(row.get("corp") or "")
-    out = []
-    for src in row.get("sources") or []:
-        if not any(n in src for n in names):
-            out.append(src)
-    return out
+    return [src for src in (row.get("sources") or [])
+            if not any(n in src for n in names)]
 
 
 def refusal_count(answer: str) -> int:
@@ -332,58 +332,83 @@ def refusal_count(answer: str) -> int:
     return a.count("확인되지 않") + a.count("확인할 수 없") + a.count("기재되어 있지 않")
 
 
-def auto_pass(row: dict):
-    """닫힌 문항의 **잠정** 정오. 정답의 숫자 절반 이상이 답변에 있으면 통과로 본다.
-
-    서술형(숫자가 없는 정답)은 None — 못 잰다는 뜻이지 틀렸다는 뜻이 아니다.
-    """
-    r = (row.get("numbers_hit") or {}).get("ratio")
-    return None if r is None else (r >= 0.5)
-
-
 def bucket(row: dict) -> str:
-    """틀린 문항이 어디서 깨졌는지 셋으로 가른다(잠정).
+    """근거를 못 올린 문항만 기계로 가른다. 맞고 틀림은 여기서 판단하지 않는다.
 
-      검색 — 근거를 하나도 못 올렸다
-      계획 — 근거는 있는데 도구를 헤맸다(한도 도달·전부 실패·도구 0회)
-      작문 — 근거도 있고 도구도 정상인데 답이 안 맞는다
+      검색 — 도구는 불렀는데 근거를 하나도 못 올렸다
+      계획 — 조회 자체를 안 했거나 도구를 헤맸다(한도 도달·전부 실패)
+      보류 — 근거는 올렸다. 답이 맞는지는 사람이 본다(작문 문제는 여기서 갈린다)
     """
-    if auto_pass(row) is True:
-        return BUCKET_OK
+    if row.get("sources"):
+        return BUCKET_HOLD
     w = row.get("waste") or {}
     calls = row.get("tool_calls") or []
-    if not row.get("sources"):
-        if w.get("answered_without_tools") or not calls:
-            return BUCKET_PLAN          # 조회 자체를 안 했다 = 계획 문제
-        return BUCKET_SEARCH
-    if w.get("hit_call_limit") or all(
-            c.get("status") in ("error", "not_found") for c in calls):
+    if not calls or w.get("answered_without_tools") or w.get("hit_call_limit"):
         return BUCKET_PLAN
-    return BUCKET_WRITE
+    if all(c.get("status") in ("error", "not_found") for c in calls):
+        return BUCKET_PLAN
+    return BUCKET_SEARCH
+
+
+def _br(t: str) -> str:
+    """HTML 표 칸 안에서 줄바꿈이 보이게."""
+    return (t or "").strip().replace("&", "&amp;").replace("<", "&lt;") \
+                            .replace(">", "&gt;").replace("\n", "<br>")
+
+
+def tool_line(row: dict) -> str:
+    """도구 호출을 한 줄로. 무엇을 몇 번 불러 어떻게 됐는지."""
+    calls = row.get("tool_calls") or []
+    if not calls:
+        return "도구 호출 없음"
+    agg: dict = {}
+    for c in calls:
+        k = (c.get("name"), c.get("status"))
+        agg[k] = agg.get(k, 0) + 1
+    return " · ".join(f"{n}×{cnt}({st})" for (n, st), cnt in agg.items())
 
 
 def write_review(rows: list, run_name: str) -> Path:
-    """사람이 채점할 파일. 질문·답변·정답을 나란히 둔다."""
-    L = [f"# e2e 사람 채점용 — {run_name}", "",
-         f"문항 {len(rows)}건. `verdict` 는 비어 있다 — 아래를 읽고 채운다.",
-         "숫자 일치는 기계가 센 힌트이고 점수가 아니다. 서술형은 숫자가 없다.", ""]
-    for r in sorted(rows, key=lambda x: (x["qtype"], x["qid"])):
-        nh = r.get("numbers_hit") or {}
-        L += [f"## {r['qid']}  [{r['qtype']}]", "",
-              f"- 도구 {r['n_tool_calls']}회 · 근거 {len(r.get('sources') or [])}건 "
-              f"· 숫자 {nh.get('hit')}/{nh.get('total')} · 자동분류 **{bucket(r)}**",
-              f"- 비용 {U.fmt_won((r.get('usage') or {}).get('est_won'))} "
-              f"· {r.get('elapsed')}초",
-              "", "**질문**", "", f"> {r.get('question', '')}", "",
-              "**Agent 답변**", "", "```", (r.get("answer") or "").strip(), "```", "",
-              "**정답(벤치)**", "", "```", (r.get("ground_truth") or "").strip(), "```",
-              "", "**출처**", ""]
-        for src in (r.get("sources") or []) or ["(없음)"]:
-            L.append(f"- {src}")
+    """사람이 1분 안에 판정하는 파일. 정답과 답변을 **나란히** 놓는다.
+
+    스크롤을 오가면 판정이 느려진다. 그래서 두 칸짜리 표로 붙여 놓고,
+    정답의 '※ 오답 유형' 이후는 접어서 맨 아래로 내린다.
+    """
+    L = [f"# e2e 사람 채점 — {run_name}", "",
+         f"문항 {len(rows)}건. 각 문항의 판정란을 채운다.", "",
+         "- **정답**: O(맞음) / X(틀림) / 부분(일부만 맞음)",
+         "- **출처**: 인용한 접수번호가 실제 근거 문서인가",
+         "- **환각**: 공시에 없는 수치·회사·사실을 지어냈는가",
+         "",
+         "정답 칸은 **핵심만** 보여준다. `※ 오답 유형` 이후 주의사항은 각 문항 끝에 접어 뒀다.",
+         "", "---", ""]
+
+    for i, r in enumerate(sorted(rows, key=lambda x: (x["qtype"], x["qid"])), 1):
+        head, tail = split_ground_truth(r.get("ground_truth") or "")
+        srcs = r.get("sources") or []
+        rcepts = re.findall(r"\d{14}", " ".join(srcs)) or ["없음"]
         other = cited_other_corp(r)
-        if other:
-            L += ["", f"⚠ **타사 출처 {len(other)}건** — {other}"]
-        L += ["", "---", ""]
+
+        L += [f"## {i}. {r['qid']}  ·  {r['qtype']}", "",
+              f"**질문** — {r.get('question', '')}", "",
+              "<table>",
+              "<tr><th width=\"50%\">정답(핵심)</th>"
+              "<th width=\"50%\">Agent 답변</th></tr>",
+              f"<tr><td valign=\"top\">{_br(head)}</td>"
+              f"<td valign=\"top\">{_br(r.get('answer') or '')}</td></tr>",
+              "</table>", "",
+              f"- 인용 접수번호 {len(rcepts) if srcs else 0}건: `{', '.join(rcepts)}`"
+              + (f"  ⚠ **타사 출처 {len(other)}건**" if other else ""),
+              f"- 도구: {tool_line(r)}  ·  "
+              f"{U.fmt_won((r.get('usage') or {}).get('est_won'))} · {r.get('elapsed')}초",
+              "",
+              "**판정** — [정답: O / X / 부분]  [출처: O / X]  [환각: O / X]  [메모: ]",
+              ""]
+        if tail:
+            L += ["<details><summary>정답 주의사항(오답 유형·환각 방지·역질문)</summary>",
+                  "", "```", tail, "```", "", "</details>", ""]
+        L += ["---", ""]
+
     REPORTS.mkdir(parents=True, exist_ok=True)
     path = REPORTS / f"{run_name}_review.md"
     path.write_text("\n".join(L), encoding="utf-8", newline="\n")
@@ -488,8 +513,7 @@ def run(items: list, out_path: Path, budget, sleep: float, model, deadline: floa
             "stopped_by_budget": bool(res.get("stopped_by_budget")),
             "note": res.get("note") or "",
             "elapsed": round(time.time() - t0, 2),
-            "numbers_hit": numbers_hit(res.get("answer") or "", it["ground_truth"]),
-            "verdict": None,        # 사람/심판이 채운다. 여기서 채점하지 않는다
+            "verdict": None,        # 사람이 채운다 — 자동 채점은 폐기했다
         }
         rows.append(row)
         with open(out_path, "a", encoding="utf-8", newline="\n") as fh:
@@ -606,30 +630,44 @@ def report(rows: list, budget, run_name: str, pf: dict) -> str:
                  f"{sum(1 for x in g if not x['sources'])} |")
     L.append("")
 
-    # ── 자동 분류 (잠정)
+    # ── 근거를 못 올린 문항만 기계로 가른다
     b = Counter(bucket(r) for r in rows)
-    n_wrong = sum(v for k, v in b.items() if k != BUCKET_OK)
-    L += ["## 실패 3분류 (기계 판정 · 잠정)", "",
+    L += ["## 근거를 못 올린 문항", "",
           "| 통 | 문항 | 뜻 |", "|---|---|---|",
-          f"| 검색 | {b[BUCKET_SEARCH]} | 근거를 하나도 못 올렸다 |",
-          f"| 계획 | {b[BUCKET_PLAN]} | 도구를 헤맸다(한도 도달·전부 실패·조회 안 함) |",
-          f"| 작문 | {b[BUCKET_WRITE]} | 근거는 있는데 답이 안 맞는다 |",
-          f"| 통과 | {b[BUCKET_OK]} | 정답 숫자의 절반 이상이 답변에 있다 |", "",
-          f"틀린 것으로 분류된 문항 {n_wrong}/{len(rows)}.",
-          "**서술형은 숫자가 없어 기계로 가릴 수 없다** — 통과/실패를 그대로 믿지 말고",
-          f"`{REPORTS.name}/{run_name}_review.md` 를 사람이 읽어야 한다.", ""]
+          f"| 검색 | {b[BUCKET_SEARCH]} | 도구는 불렀는데 근거가 하나도 안 올라왔다 |",
+          f"| 계획 | {b[BUCKET_PLAN]} | 조회를 안 했거나 도구를 헤맸다(한도·전부 실패) |",
+          f"| 보류(사람) | {b[BUCKET_HOLD]} | 근거는 올렸다. 맞는지는 사람이 본다 |", "",
+          "**자동 채점은 폐기했다.** 정답에 '오답 유형' 반례 숫자가 섞여 있어 숫자 일치로는",
+          f"맞고 틀림을 가릴 수 없다. 판정은 `{REPORTS.name}/{run_name}_review.md` 에서 한다.",
+          ""]
 
-    # ── 유형별 정오(잠정)
-    L += ["## 유형별 (잠정 정확도)", "",
-          "| 유형 | 문항 | 숫자 잴 수 있음 | 통과 | 통과율 | 못 재는 문항 |",
-          "|---|---|---|---|---|---|"]
+    # ── 유형별 (잰 것만)
+    L += ["## 유형별 (기계로 잰 것만)", "",
+          "| 유형 | 문항 | 근거 확보 | 근거 확보율 | 평균 근거 | 평균 도구 | 평균 비용 |",
+          "|---|---|---|---|---|---|---|"]
     for k in sorted(by):
         g = by[k]
-        gradable = [x for x in g if auto_pass(x) is not None]
-        passed = [x for x in gradable if auto_pass(x)]
-        rate = f"{len(passed) / len(gradable) * 100:.0f}%" if gradable else "—"
-        L.append(f"| {k} | {len(g)} | {len(gradable)} | {len(passed)} | {rate} | "
-                 f"{len(g) - len(gradable)} |")
+        got = [x for x in g if x.get("sources")]
+        L.append(f"| {k} | {len(g)} | {len(got)} | {len(got) / len(g) * 100:.0f}% | "
+                 f"{sum(len(x.get('sources') or []) for x in g) / len(g):.1f} | "
+                 f"{sum(x['n_tool_calls'] for x in g) / len(g):.1f} | "
+                 f"{U.fmt_won(sum((x['usage'].get('est_won') or 0) for x in g) / len(g))} |")
+    got_all = sum(1 for x in rows if x.get("sources"))
+    L += ["", f"전체 근거 확보율 **{got_all}/{len(rows)} "
+              f"({got_all / len(rows) * 100:.0f}%)**", ""]
+
+    # ── 도구별 성적
+    tool_stat: dict = Counter()
+    for r in rows:
+        for c in r.get("tool_calls") or []:
+            tool_stat[(c.get("name"), c.get("status"))] += 1
+    names = sorted({n for n, _ in tool_stat})
+    L += ["## 도구별 성적", "", "| 도구 | 호출 | ok | not_found | error |",
+          "|---|---|---|---|---|"]
+    for n in names:
+        tot = sum(v for (nn, _), v in tool_stat.items() if nn == n)
+        L.append(f"| {n} | {tot} | {tool_stat[(n, 'ok')]} | "
+                 f"{tool_stat[(n, 'not_found')]} | {tool_stat[(n, 'error')]} |")
     L.append("")
 
     # ── [2][3][4] 수정 효과
@@ -648,16 +686,14 @@ def report(rows: list, budget, run_name: str, pf: dict) -> str:
           f"| 항목별 거절을 밝힌 문항 | {len(refus)} (총 {sum(n for _, n in refus)}회) |",
           ""]
 
-    L += ["## 채점", "",
-          "`verdict` 는 비어 있다. 이 스크립트는 채점하지 않는다 — 자동 채점 방식이",
-          "아직 정해지지 않았다. `numbers_hit` 은 정답의 숫자가 답변에 몇 개 들어 있는지를",
-          "센 것으로 **닫힌 문항의 힌트일 뿐 점수가 아니다**(서술형은 숫자가 없다).", "",
-          "| 문항 | 유형 | 숫자 일치 | 근거 | 비고 |", "|---|---|---|---|---|"]
+    L += ["## 판정 (사람이 채운다)", "",
+          f"`{REPORTS.name}/{run_name}_review.md` 에 질문·정답·답변이 나란히 있다.",
+          "이 표는 그 파일을 다 채운 뒤 옮겨 적는 자리다.", "",
+          "| 문항 | 유형 | 근거 | 도구 | 정답 | 출처 | 환각 |",
+          "|---|---|---|---|---|---|---|"]
     for r in rows:
-        nh = r["numbers_hit"]
-        ratio = "-" if nh["ratio"] is None else f"{nh['hit']}/{nh['total']}"
-        L.append(f"| {r['qid']} | {r['qtype']} | {ratio} | {len(r['sources'])} | "
-                 f"{(r['note'] or '')[:40]} |")
+        L.append(f"| {r['qid']} | {r['qtype']} | {len(r.get('sources') or [])} | "
+                 f"{r['n_tool_calls']} | | | |")
     L.append("")
     return "\n".join(L)
 

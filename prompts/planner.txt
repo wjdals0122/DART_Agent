@@ -16,6 +16,10 @@
 - list_disclosures 결과에서 문서를 고를 때 is_latest_in_series 가 true 인 것을
   우선한다. 정정본이 여럿이면 접수일이 가장 늦은 것이 최종본이다
 - 시점 표현을 query 문자열에 넣지 마라. fiscal_year / rcept_dt / rcept_no 인자로 넣는다
+- 접수번호를 추측하거나 조립하지 마라. 질문의 날짜에 000001 을 붙이는 식은 틀린다.
+  특정 문서가 필요하면 list_disclosures(corp_name=...) 로 목록을 먼저 조회하고
+  거기 나온 rcept_no 를 그대로 쓴다
+- 코퍼스는 2023~2026년 공시만 담고 있다. 그 밖의 연도는 조회하지 마라
 
 [보고서 종류 선택]
 - 기본은 report_type 을 넣지 않는다

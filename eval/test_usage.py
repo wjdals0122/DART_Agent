@@ -262,10 +262,31 @@ def main() -> int:
           and abs(pf2["won"] - 450.0) < 1e-6,
           f"{pf2['total']:,}토큰 · {U.fmt_won(pf2['won'])}")
 
-    nh = E.numbers_hit("매출액은 148,181,177천원이다", "148,181,177천원 (약 1,481억)")
-    check("숫자 힌트가 센다", nh["hit"] >= 1, str(nh))
-    nh2 = E.numbers_hit("서술형 답변입니다", "숫자가 없는 서술형 정답")
-    check("숫자가 없으면 ratio=None(못 잰다)", nh2["ratio"] is None, str(nh2))
+    # 자동 채점(numbers_hit)은 폐기했다. 이제 기계가 세는 것은 아래뿐이다.
+    head, tail = E.split_ground_truth(
+        "정답은 148,181,177천원이다. ※ 오답 유형: 361,835,555천원을 답하면 오답")
+    check("정답에서 '핵심'만 잘라낸다", "148,181,177" in head and "※" not in head, head)
+    check("'오답 유형'은 뒤로 뺀다", tail.startswith("※"), tail[:30])
+    check("표시가 없으면 전부 핵심", E.split_ground_truth("숫자 없는 서술형")[1] == "")
+
+    got = {"sources": ["[삼성전자 사업보고서 …]"], "corp": "삼성전자", "qtype": "x",
+           "tool_calls": [{"name": "search_disclosure", "status": "ok"}], "waste": {}}
+    none = {"sources": [], "corp": "삼성전자", "qtype": "x",
+            "tool_calls": [{"name": "search_disclosure", "status": "ok"}], "waste": {}}
+    noplan = {"sources": [], "corp": "삼성전자", "qtype": "x", "tool_calls": [],
+              "waste": {"answered_without_tools": True}}
+    check("근거가 있으면 사람 판정으로 넘긴다", E.bucket(got) == E.BUCKET_HOLD)
+    check("도구는 돌았는데 근거가 없으면 '검색'", E.bucket(none) == E.BUCKET_SEARCH)
+    check("조회 자체를 안 했으면 '계획'", E.bucket(noplan) == E.BUCKET_PLAN)
+
+    other = E.cited_other_corp({"corp": "두산로보틱스",
+                                "sources": ["[KB금융 사업보고서 (2025.12), …]"]})
+    check("타사 출처를 잡아낸다", len(other) == 1, str(other))
+    same = E.cited_other_corp({"corp": "삼성전자",
+                               "sources": ["[삼성전자 사업보고서 (2024.12), …]"]})
+    check("자기 회사 출처는 안 잡는다", not same)
+    check("거절 횟수를 센다",
+          E.refusal_count("A는 확인되지 않습니다. B도 확인할 수 없습니다.") == 2)
 
     print(f"\n{BAR}")
     if _FAILED:

@@ -115,6 +115,39 @@ def main() -> int:
     check("20250311001085 이 상위에 있다", "20250311001085" in rcs,
           f"{rcs.index('20250311001085') + 1}위" if "20250311001085" in rcs else str(rcs))
 
+    print(f"\n{BAR}\n7 — 접수번호·연도 방어 (e2e 1차에서 모델이 번호를 지어냈다)\n{BAR}")
+    r = TOOLS["list_disclosures"](corp_name="두산로보틱스", series_of="20260619000667")
+    print(f"   note={r['note']}")
+    check("남의 회사 접수번호는 error", r["status"] == "error" and "KB금융" in r["note"])
+    r = TOOLS["list_disclosures"](corp_name="OCI홀딩스", fiscal_year=2017)
+    print(f"   note={r['note']}")
+    check("코퍼스 범위 밖 연도는 not_found + 범위 안내",
+          r["status"] == "not_found" and "범위 밖" in r["note"])
+    r = TOOLS["list_disclosures"](corp_name="HD현대중공업", series_of="20230310000001")
+    check("없는 접수번호는 error + 목록 조회 안내",
+          r["status"] == "error" and "추측하지 말고" in r["note"])
+    r = TOOLS["list_disclosures"](corp_name="HD현대일렉트릭", series_of="2024013000001")
+    check("14자리가 아니면 형식 오류를 밝힌다",
+          r["status"] == "error" and "형식이 틀렸다" in r["note"])
+    r = TOOLS["search_disclosure"](query="매출", corp_name="삼성전자",
+                                   rcept_no="20240101999999")
+    check("search_disclosure 의 rcept_no 도 같은 검사를 받는다",
+          r["status"] == "error" and "코퍼스에 없다" in r["note"])
+    r = TOOLS["list_disclosures"](corp_name="KB금융", series_of="20260619000667")
+    check("자기 회사 계열은 그대로 동작한다(회귀)",
+          r["status"] == "ok" and r["total"] == 3)
+
+    print(f"\n{BAR}\n8 — 프롬프트에 베낄 수 있는 실제 접수번호가 없다\n{BAR}")
+    import re as _re
+
+    pat = _re.compile(r"\d{14}")
+    for name in ("system.txt", "system_min.txt", "planner.txt"):
+        f = ROOT / "prompts" / name
+        hits = pat.findall(f.read_text(encoding="utf-8")) if f.is_file() else []
+        check(f"{name} 에 14자리 접수번호 없음", not hits, str(hits))
+    tj = (ROOT / "config" / "tools.json").read_text(encoding="utf-8")
+    check("tools.json 에 14자리 접수번호 없음", not pat.findall(tj))
+
     print(f"\n{BAR}")
     if _FAILED:
         print(f"실패 {len(_FAILED)}건: {_FAILED}")
