@@ -1,0 +1,156 @@
+{
+  "고려아연__search_closed": {
+    "class": "a",
+    "cause": "검색어가 절 제목만 담고 제품명(은·아연·금)을 안 담았다",
+    "section": "[고려아연] [기재정정]사업보고서 (2025.12) > II. 사업의 내용 > 2. 주요 제품 및 서비스",
+    "rank_original": 99,
+    "rank_by_numbers": 5,
+    "rank_ideal": 4,
+    "ideal_query": "주요 제품 아연 연 은 금 매출액 비중",
+    "n_candidates": 8592,
+    "gold": {
+      "vec": 0.5151,
+      "bm25": 29.9425,
+      "rrf": 0.0093
+    },
+    "gold_vec_rank": 515,
+    "gold_bm25_rank": 47,
+    "top1": {
+      "vec": 0.5698,
+      "bm25": 32.3313,
+      "rrf": 0.0282
+    }
+  },
+  "레인보우로보틱스__search_closed": {
+    "class": "a",
+    "cause": "'초정밀'·'총판'·'16개국' 같은 본문 고유어가 검색어에 없었다",
+    "section": "[레인보우로보틱스] [기재정정]사업보고서 (2024.12) > II. 사업의 내용 > 4. 매출 및 수주상황",
+    "rank_original": 51,
+    "rank_by_numbers": null,
+    "rank_ideal": 6,
+    "ideal_query": "초정밀 지향 마운트 총판 대리점 미국 16개국 40개",
+    "n_candidates": 2628,
+    "gold": {
+      "vec": 0.4473,
+      "bm25": 33.2307,
+      "rrf": 0.017
+    },
+    "gold_vec_rank": 44,
+    "gold_bm25_rank": 75,
+    "top1": {
+      "vec": 0.5171,
+      "bm25": 53.8951,
+      "rrf": 0.0296
+    }
+  },
+  "삼성화재해상보험__search_closed": {
+    "class": "b",
+    "cause": "정답이 표가 아니라 '1. 사업의 개요' 산문 32~44% 지점에 묻혀 있다. 청크 앞부분이 회사 일반 소개라 임베딩이 그쪽으로 쏠리고(vec 424위), '장기보험·자동차보험'은 이 회사 청크의 4~5%에 흩어져 있어 BM25 변별력도 없다. 같은 말을 더 많이 가진 '보험금융수익'·'재무건전성' 절이 이긴다",
+    "section": "[삼성화재해상보험] 사업보고서 (2025.12) > II. 사업의 내용 > 1. 사업의 개요",
+    "rank_original": 56,
+    "rank_by_numbers": 4,
+    "rank_ideal": null,
+    "ideal_query": "장기보험 자동차보험 일반보험 보험수익 상품별",
+    "n_candidates": 12552,
+    "gold": {
+      "vec": 0.5991,
+      "bm25": 26.2211,
+      "rrf": 0.0127
+    },
+    "gold_vec_rank": 424,
+    "gold_bm25_rank": 19,
+    "top1": {
+      "vec": 0.6235,
+      "bm25": 26.5733,
+      "rrf": 0.0232
+    }
+  },
+  "NAVER__search_closed": {
+    "class": "a",
+    "cause": "원래 검색어로도 3위였다. 사람이 grep 을 썼을 뿐 검색기는 찾았다",
+    "section": "[NAVER] 사업보고서 (2023.12) > II. 사업의 내용 > 4. 매출 및 수주상황",
+    "rank_original": 3,
+    "rank_by_numbers": 1,
+    "rank_ideal": 5,
+    "ideal_query": "부문별 매출실적 서비스별 영업현황 서치플랫폼 커머스 핀테크 콘텐츠 클라우드",
+    "n_candidates": 8263,
+    "gold": {
+      "vec": 0.604,
+      "bm25": 29.9585,
+      "rrf": 0.0267
+    },
+    "gold_vec_rank": 12,
+    "gold_bm25_rank": 16,
+    "top1": {
+      "vec": 0.6201,
+      "bm25": 27.3886,
+      "rrf": 0.0274
+    }
+  },
+  "삼성생명__search_closed": {
+    "class": "b",
+    "cause": "위와 같은 모양. 1,143자 청크의 앞 20%가 회사 소개라 vec 1168위. top-10 이 '2. 영업의 현황'(수입보험료 표가 보통 있는 절)으로 채워진다 — 검색기는 더 그럴듯한 절을 골랐고, 답이 개요 산문에 있던 게 예외였다",
+    "section": "[삼성생명] [기재정정]사업보고서 (2025.12) > II. 사업의 내용 > 1. 사업의 개요",
+    "rank_original": 14,
+    "rank_by_numbers": 3,
+    "rank_ideal": 27,
+    "ideal_query": "수입보험료 사망보험 생존보험 생사혼합보험 단체보험 퇴직연금",
+    "n_candidates": 12529,
+    "gold": {
+      "vec": 0.5454,
+      "bm25": 26.8691,
+      "rrf": 0.0154
+    },
+    "gold_vec_rank": 1168,
+    "gold_bm25_rank": 5,
+    "top1": {
+      "vec": 0.6089,
+      "bm25": 21.7854,
+      "rrf": 0.0262
+    }
+  },
+  "CJ제일제당__search_closed": {
+    "class": "a",
+    "cause": "표의 행 이름만 있고 표의 다른 항목(매출액·영업이익)이 없어 표를 못 짚었다",
+    "section": "[CJ제일제당] [기재정정]사업보고서 (2024.12) > III. 재무에 관한 사항 > 1. 요약재무정보",
+    "rank_original": 25,
+    "rank_by_numbers": 3,
+    "rank_ideal": 3,
+    "ideal_query": "요약연결재무정보 매출액 영업이익 당기순이익 지배기업의 소유주지분 제18기",
+    "n_candidates": 7431,
+    "gold": {
+      "vec": 0.6064,
+      "bm25": 38.2188,
+      "rrf": 0.023
+    },
+    "gold_vec_rank": 47,
+    "gold_bm25_rank": 13,
+    "top1": {
+      "vec": 0.6514,
+      "bm25": 37.7226,
+      "rrf": 0.0293
+    }
+  },
+  "SK텔레콤__search_closed": {
+    "class": "b",
+    "cause": "정답 청크는 맞는 표다. 그런데 top-10 중 9개가 같은 '4. 부문정보(연결)' 절의 다른 보고서판이다. 접수일·사업연도 필터가 없으면 제42기를 고를 신호가 없다",
+    "section": "[SK텔레콤] 사업보고서 (2025.12) > II. 사업의 내용 > 4. 매출 및 수주상황",
+    "rank_original": 32,
+    "rank_by_numbers": 9,
+    "rank_ideal": 24,
+    "ideal_query": "영업부문별 무선통신사업 유선통신사업 기타사업 영업수익 영업이익",
+    "n_candidates": 6907,
+    "gold": {
+      "vec": 0.5386,
+      "bm25": 17.8004,
+      "rrf": 0.0216
+    },
+    "gold_vec_rank": 34,
+    "gold_bm25_rank": 31,
+    "top1": {
+      "vec": 0.624,
+      "bm25": 25.0658,
+      "rrf": 0.0328
+    }
+  }
+}
