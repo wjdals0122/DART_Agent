@@ -46,6 +46,26 @@ MAX_TOKENS = 2048          # 도구 호출은 1024 이상이어야 한다(문서
 TEMPERATURE = 0.1
 FALLBACK = "공시에서 확인되지 않음"
 
+# 도구 결과를 다 넣은 직후 딱 한 번 끼워 넣는 형식 리마인더.
+#
+# 【왜 필요한가】
+# 시스템 프롬프트가 4,000자인데 도구 결과가 그 뒤로 12,000자쯤 쌓인다. 답을 쓸 때쯤이면
+# 형식 규칙이 멀어져서, 실측으로 (1) 사칙연산을 calculate 없이 암산하고
+# (2) 근거 절을 빠뜨리거나 대괄호를 떼먹었다. 가까이에서 한 번 더 말해 준다.
+#
+# 【왜 이 자리인가】
+# "모델이 답변만 내놓으려는 턴" 은 불러 보기 전엔 알 수 없다. 그걸 알아내려면
+# 한 번 부르고 버린 뒤 다시 부르는 셈이라 LLM 호출이 두 배가 된다.
+# 도구 결과가 들어온 직후면 다음 턴이 십중팔구 답변 턴이고, 아니어도 손해가 없다
+# (모델이 도구를 더 부르면 루프는 그냥 계속 돈다).
+REMINDER = "\n".join([
+    "위 자료만으로 답하라. 두 가지를 지켜라.",
+    "1) 사칙연산이 필요하면 암산하지 말고 calculate 도구를 부른다.",
+    "2) 답변 맨 끝에 '근거' 절을 두고, 각 문서의 source 속성을 "
+    "대괄호까지 글자 그대로 복사해 나열한다.",
+    "   예: - [삼성전자 사업보고서 (2024.12), 2025-03-11, 접수번호 20250311001085]",
+])
+
 
 def _read(name: str) -> str:
     p = PROMPTS / name
@@ -170,6 +190,7 @@ def _run(question, out, t0, model, max_calls, deadline, verbose) -> dict:
             {"role": "user", "content": str(question)}]
     cache: dict = {}
     n_calls = 0
+    reminded = False           # 리마인더는 딱 한 번만 넣는다
 
     while True:
         over_time = (time.time() - t0) > deadline
@@ -237,6 +258,11 @@ def _run(question, out, t0, model, max_calls, deadline, verbose) -> dict:
 
             msgs.append({"role": "tool", "toolCallId": call.get("id") or "",
                          "name": name, "content": _render(name, tool_out)})
+
+        if not reminded:
+            # 도구 호출 횟수에는 넣지 않는다. 이건 메시지일 뿐이다
+            msgs.append({"role": "user", "content": REMINDER})
+            reminded = True
 
         if n_calls >= max_calls:
             # 다음 턴에는 도구를 주지 않는다 — 있는 근거로 답하게 한다
