@@ -28,6 +28,18 @@ HCX-005 는 입력 1,000토큰 1.25원, 출력 1,000토큰 5원이다. **출력�
 들어 있는지(`numbers_hit`). **이것은 채점이 아니다.** 서술형은 숫자가 없거나 무의미하다.
 `verdict` 는 비워 둔다. 사람이나 심판 모델이 나중에 채운다.
 
+【표본은 한 번 정하고 얼어붙는다 — eval/e2e_sample.jsonl】
+평가 표본이 실행할 때마다 달라지면 앞뒤 결과를 비교할 수 없다. 그래서 40문항을
+한 번 뽑아 `eval/e2e_sample.jsonl` 에 적어 두고, 이후 실행은 **그 파일에서만** 고른다.
+파일이 없으면 시드로 뽑아 만들고, 있으면 읽는다(문항 원본이 바뀌어 사라진 qid 가
+있으면 지어내지 않고 경고한다).
+
+5문항 스모크와 40문항 전량이 **같은 run 이름**을 쓰면 결과가 한 파일에 쌓이고,
+`--resume` 이 이미 끝낸 문항을 건너뛴다. 스모크 5건을 다시 돌릴 필요가 없다.
+
+  python eval/run_e2e.py --run e2e_sample --n 5 --types search_closed … --yes
+  python eval/run_e2e.py --run e2e_sample --n 40 --resume --yes   # 남은 35건만
+
 【문항 원본】
 `Question/질문_(수정해서 다시 할 것)/benchmark_*.json`
   {company, doc_info, scenarios: {유형: {query, ground_truth}}}
@@ -56,6 +68,7 @@ from src.agent import usage as U  # noqa: E402
 
 QDIR = ROOT / "Question" / "질문_(수정해서 다시 할 것)"
 RUNDIR = ROOT / "eval" / "e2e_runs"
+SAMPLE_PATH = ROOT / "eval" / "e2e_sample.jsonl"
 REPORTS = ROOT / "reports"
 TEMPLATE_FILE = "benchmark_master_templates_24.json"
 SCRIPT = "run_e2e"
@@ -153,6 +166,46 @@ def sample(items: list, n, types=None, corps=None, seed=20260903) -> list:
         if not added:
             break
     return out
+
+
+def ensure_sample(items: list, n: int, seed: int, path=SAMPLE_PATH) -> tuple:
+    """평가 표본 40문항을 파일로 고정한다. (표본, 경고).
+
+    이미 있으면 그대로 읽는다 — 실행할 때마다 표본이 바뀌면 비교가 불가능하다.
+    파일에 있는 qid 가 문항 원본에서 사라졌으면 **채우지 않고 알린다**.
+    """
+    by_qid = {x["qid"]: x for x in items}
+    if path.is_file():
+        picked, warn, missing = [], [], []
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    qid = json.loads(line).get("qid")
+                except ValueError:
+                    warn.append(f"{path.name} 에 읽을 수 없는 줄이 있다")
+                    continue
+                if qid in by_qid:
+                    picked.append(by_qid[qid])
+                else:
+                    missing.append(qid)
+        if missing:
+            warn.append(f"{path.name} 의 문항 {len(missing)}건이 원본에 없다: "
+                        f"{missing[:3]}{' …' if len(missing) > 3 else ''}")
+        warn.insert(0, f"표본 {len(picked)}건을 {path.name} 에서 읽었다(고정 표본)")
+        return picked, warn
+
+    picked = sample(items, n, seed=seed)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        for x in picked:
+            fh.write(json.dumps({"qid": x["qid"], "corp": x["corp"],
+                                 "qtype": x["qtype"], "src_file": x["src_file"]},
+                                ensure_ascii=False) + "\n")
+    return picked, [f"표본 {len(picked)}건을 새로 뽑아 {path.name} 에 고정했다 "
+                    f"(seed={seed}). 이후 실행은 이 파일에서만 고른다"]
 
 
 # ---------------------------------------------------------------- 힌트(채점 아님)
@@ -258,7 +311,12 @@ def run(items: list, out_path: Path, budget, sleep: float, model, deadline: floa
             "src_file": it["src_file"],
             "answer": res.get("answer") or "",
             "sources": res.get("sources") or [],
-            "tool_calls": [{k: c.get(k) for k in ("n", "name", "status", "summary")}
+            # arguments 와 note 를 반드시 남긴다. 실패를 검색/계획/작문 셋으로 가르려면
+            # "무엇을 넣고 불렀는지" 가 있어야 한다. 첫 실행에서 이게 없어 도구가
+            # 0건을 돌려준 이유를 못 봤다.
+            "tool_calls": [{k: c.get(k)
+                            for k in ("n", "name", "arguments", "status",
+                                      "summary", "note")}
                            for c in (res.get("tool_calls") or [])],
             "n_tool_calls": len(res.get("tool_calls") or []),
             "usage": res.get("usage") or {},
@@ -403,7 +461,12 @@ def report(rows: list, budget, run_name: str, pf: dict) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="e2e 평가 (토큰·비용 상한 포함)")
-    ap.add_argument("--n", type=int, default=40, help="문항 수 (0=전량)")
+    ap.add_argument("--n", type=int, default=40,
+                    help="이번에 돌릴 문항 수 (0=고정 표본 전량)")
+    ap.add_argument("--sample-n", type=int, default=40,
+                    help="고정 표본 크기. eval/e2e_sample.jsonl 이 없을 때만 쓰인다")
+    ap.add_argument("--all-items", action="store_true",
+                    help="고정 표본을 무시하고 240문항 전체를 후보로 쓴다")
     ap.add_argument("--types", nargs="*", default=None,
                     help="유형 필터 (search_closed search_open multi_closed …)")
     ap.add_argument("--corps", nargs="*", default=None, help="회사 필터")
@@ -431,7 +494,18 @@ def main() -> int:
     print(f"[문항] 총 {len(items)}건 · 회사 {len({x['corp'] for x in items})} · "
           f"유형 {dict(Counter(x['qtype'] for x in items))}")
 
-    picked = sample(items, a.n, a.types, a.corps, a.seed)
+    if a.all_items:
+        pool = items
+        print("[표본] 고정 표본을 쓰지 않는다 — 240문항 전체가 후보")
+    else:
+        pool, swarn = ensure_sample(items, a.sample_n, a.seed)
+        for m in swarn:
+            print(f"[표본] {m}")
+        if not pool:
+            print("[중단] 고정 표본이 비었다", file=sys.stderr)
+            return 2
+
+    picked = sample(pool, a.n, a.types, a.corps, a.seed)
 
     run_name = a.run or ("e2e_" + time.strftime("%Y%m%d_%H%M%S"))
     out_path = RUNDIR / f"{run_name}.jsonl"
@@ -443,8 +517,8 @@ def main() -> int:
         already = done_qids(out_path)
         before = len(picked)
         picked = [x for x in picked if x["qid"] not in already]
-        print(f"[resume] {out_path.name} 에 이미 {len(already)}건. "
-              f"{before} → {len(picked)}건만 돈다")
+        print(f"[resume] {out_path.name} 에 이미 {len(already)}건 있다. "
+              f"{before} → {len(picked)}건만 돈다 (끝난 것은 결과를 그대로 쓴다)")
 
     print(f"[표본] {len(picked)}건 · {dict(Counter(x['qtype'] for x in picked))}")
     if not picked:
