@@ -111,6 +111,49 @@ _GEUN = re.compile(r"\n[ \t]*(?:\*\*)?근거(?:\*\*)?[ \t]*:?[ \t]*\n"
                    r"(?:[ \t]*[-*][^\n]*\n?)+\s*$")
 _RCEPT = re.compile(r"\d{14}")
 
+# 근거가 하나도 없는데 사실을 단정하는 답변에 붙일 표시.
+#
+# 【왜 지우지 않는가】
+# 통째로 지우면 맞는 답도 잃는다. 표시만 하면 평가자가 판단할 수 있고,
+# 우리도 이런 사례가 몇 건인지 셀 수 있다(`unsourced_claim`).
+#
+# 【무엇을 단정으로 보는가 — 좁게 잡았다】
+# (1) 3자리 이상 숫자. 단, 연도(1900~2100)는 뺀다 — 질문을 되풀이하는 자리에 흔하다
+# (2) "없었습니다" "접수되지 않았습니다" 같은 사실 단정 어미
+# **거절 문장은 단정이 아니다.** "공시에서 확인되지 않습니다" 가 걸리면 정상 거절까지
+# 오염 표시를 받는다. 그래서 거절 표현이 든 문장은 먼저 걷어내고 나머지만 본다.
+UNSOURCED_MARK = "※ 아래 내용은 공시 조회로 확인되지 않았습니다."
+_SENT = re.compile(r"[^.!?\n]+[.!?\n]?")
+_NUM3 = re.compile(r"\d[\d,]{2,}(?:\.\d+)?")
+_YEAR = re.compile(r"^(?:19|20)\d{2}$")
+_REFUSAL = ("확인되지 않", "확인할 수 없", "찾을 수 없", "확인이 필요",
+            "제공할 수 없", "알 수 없", "확인해 드릴 수 없")
+_ASSERT = ("없었습니다", "없었다", "접수되지 않았", "제출되지 않았",
+           "발생하지 않았", "변경되지 않았", "수정되지 않았", "이루어지지 않았")
+
+
+def has_unsourced_claim(text: str, sources: list) -> bool:
+    """근거가 0건인데 숫자나 사실 단정이 있으면 True."""
+    if sources:
+        return False
+    for sent in _SENT.findall(text or ""):
+        if any(w in sent for w in _REFUSAL):
+            continue                       # 거절 문장은 단정이 아니다
+        for m in _NUM3.finditer(sent):
+            if not _YEAR.match(m.group(0).replace(",", "")):
+                return True
+        if any(w in sent for w in _ASSERT):
+            return True
+    return False
+
+
+def mark_unsourced(text: str) -> str:
+    """맨 앞에 한 줄만 붙인다. 본문은 건드리지 않는다."""
+    body = (text or "").strip()
+    if body.startswith(UNSOURCED_MARK):
+        return body
+    return f"{UNSOURCED_MARK}\n\n{body}"
+
 
 
 def _read(name: str) -> str:
@@ -280,7 +323,7 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
                      "hit_call_limit": False, "http_retry": 0, "retry_429": 0,
                      "retry_wait_s": 0.0, "resent_prompt_tokens_est": 0,
                      "no_tool_nudge": False, "answered_without_tools": False},
-           "stopped_by_budget": False}
+           "stopped_by_budget": False, "unsourced_claim": False}
     try:
         out = _run(question, out, t0, model, max_tool_calls, deadline, verbose, qid)
     except Exception as e:                     # noqa: BLE001 — 마지막 방어선
@@ -294,6 +337,14 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
     except Exception as e:                     # noqa: BLE001 — 붙이다 죽으면 안 된다
         traceback.print_exc(file=sys.stderr)
         out["note"] = (out.get("note") or "") + f" · 근거 절 조립 실패: {e}"
+    # 근거 0건인데 숫자·사실을 단정했으면 지우지 말고 표시만 한다
+    try:
+        if has_unsourced_claim(out["answer"], out.get("sources") or []):
+            out["unsourced_claim"] = True
+            out["answer"] = mark_unsourced(out["answer"])
+    except Exception as e:                     # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        out["note"] = (out.get("note") or "") + f" · 무근거 표시 실패: {e}"
     out["elapsed"] = round(time.time() - t0, 2)
     return out
 

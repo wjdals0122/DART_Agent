@@ -137,6 +137,29 @@ def main() -> int:
     check("자기 회사 계열은 그대로 동작한다(회귀)",
           r["status"] == "ok" and r["total"] == 3)
 
+    print(f"\n{BAR}\n7-b — doc_group · 목록→본문 안내\n{BAR}")
+    r = TOOLS["list_disclosures"](corp_name="두산퓨얼셀", doc_group="exchange",
+                                  fiscal_year=2024)
+    print(f"   note={r['note']}")
+    check("사업연도 없는 doc_group + fiscal_year 는 error",
+          r["status"] == "error" and "사업연도가 없다" in r["note"])
+    check("대안(date_from/date_to)을 알려준다", "date_from" in r["note"])
+    r = TOOLS["list_disclosures"](corp_name="미래에셋증권", doc_group="exchange")
+    print(f"   note={r['note']}")
+    check("그 종류가 0건이면 보유 현황을 알려준다",
+          r["status"] == "not_found" and "보유 현황" in r["note"]
+          and "periodic 19" in r["note"])
+    r = TOOLS["list_disclosures"](corp_name="두산퓨얼셀", doc_group="exchange",
+                                  date_from="20250101", date_to="20251231", limit=3)
+    check("기간으로 좁히면 exchange 도 나온다", r["status"] == "ok" and r["total"] > 0,
+          f"total={r['total']}")
+    check("성공 응답에 '내용을 보려면 search_disclosure' 안내가 붙는다",
+          "search_disclosure(rcept_no=" in r["note"])
+    r = TOOLS["list_disclosures"](corp_name="LG이노텍", doc_group="periodic",
+                                  fiscal_year=2025, limit=3)
+    check("periodic + fiscal_year 는 그대로 동작한다(회귀)",
+          r["status"] == "ok" and r["total"] == 5, f"total={r['total']}")
+
     print(f"\n{BAR}\n8 — 프롬프트에 베낄 수 있는 실제 접수번호가 없다\n{BAR}")
     import re as _re
 

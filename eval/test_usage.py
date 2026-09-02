@@ -288,6 +288,35 @@ def main() -> int:
     check("거절 횟수를 센다",
           E.refusal_count("A는 확인되지 않습니다. B도 확인할 수 없습니다.") == 2)
 
+    print(f"\n{BAR}\n7 — 근거 0건 + 사실 단정에 표시가 붙는가\n{BAR}")
+    src = ["[○○기업 사업보고서 (2023.12), 2024-03-20, 접수번호 20240320000123]"]
+    for name, txt, s_, want in [
+            ("근거0 + 수치 단정", "변경공시는 없었습니다. 총액은 1,287십억 원입니다.", [], True),
+            ("근거0 + 사실 단정", "정정보고서는 접수되지 않았습니다.", [], True),
+            ("근거0 + 정상 거절", "공시에서 확인되지 않습니다.", [], False),
+            ("근거0 + 거절 문장 속 숫자", "2017년 소송 정보를 찾을 수 없습니다.", [], False),
+            ("근거0 + 연도만", "질문하신 2024년 기준으로 답변드립니다.", [], False),
+            ("근거 있음 + 수치", "계약금액은 64,400,000,000원이다.", src, False),
+            ("근거0 + 거절 뒤 단정", "소송은 확인되지 않습니다. 배당은 주당 1,500원입니다.",
+             [], True)]:
+        check(name, loop.has_unsourced_claim(txt, s_) is want,
+              f"{loop.has_unsourced_claim(txt, s_)}")
+    marked = loop.mark_unsourced("없었습니다. 1,287")
+    check("표시는 맨 앞 한 줄", marked.startswith(loop.UNSOURCED_MARK))
+    check("두 번 붙지 않는다", loop.mark_unsourced(marked).count("※") == 1)
+
+    # 루프를 끝까지 돌려 실제로 붙는지 본다(도구를 안 부르는 경로)
+    def chat_bare_number(messages, **kw):
+        return reply(tool=False, usage=USAGE, text="변경공시는 없었습니다. 총액 1,287억원.")
+
+    clova.chat = chat_bare_number
+    U.use_budget(U.Budget(limit_won=None))
+    res = loop.answer("질문", deadline=60)
+    clova.chat = real_chat
+    check("루프 반환에 unsourced_claim=True", res["unsourced_claim"] is True)
+    check("답변 맨 앞에 표시가 붙는다", res["answer"].startswith(loop.UNSOURCED_MARK),
+          res["answer"][:40])
+
     print(f"\n{BAR}")
     if _FAILED:
         print(f"실패 {len(_FAILED)}건: {_FAILED}")

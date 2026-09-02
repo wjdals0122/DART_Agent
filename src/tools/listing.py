@@ -14,6 +14,20 @@ manifest 에 이미 다 있는 정보라 그냥 세면 된다.
 "가장 최신 보고서가 무엇인가" 라서, limit 에 잘리는 쪽은 반드시 오래된 것이어야 한다.
 `series_of` 결과만 자른 뒤에 오름차순으로 되돌린다(정정 이력은 시간순이 읽기 좋다).
 
+【사업연도는 periodic 에만 있다 — 실측】
+  periodic  1,054건 · 사업연도 있음 100%
+  exchange  1,469건 · 0%   (report_nm 이 '단일판매ㆍ공급계약체결' 처럼 (YYYY.MM) 을 안 단다)
+  major       598건 · 0%
+  holding   1,083건 · 0%
+그래서 `doc_group="exchange" + fiscal_year=…` 같은 조합은 **구조적으로 항상 0건**이다.
+e2e 에서 두산퓨얼셀이 정확히 그 조합으로 죽었다 — exchange 문서를 83건 갖고 있는데도.
+이제 그런 조합은 not_found 가 아니라 **error 로 이유와 대안(date_from/date_to)** 을 준다.
+
+【목록은 내용이 아니다】
+e2e 에서 모델이 목록 34건을 받고 본문을 한 번도 안 열어 보고 답했다.
+성공 응답의 note 에 "내용을 보려면 rcept_no 를 골라 search_disclosure 를 불러라" 를
+매번 붙인다. 프롬프트에만 적어 두면 도구 결과가 쌓일수록 멀어져서 잊힌다.
+
 【접수번호를 추측하는 것을 막는다】
 e2e 40문항에서 모델이 접수번호를 **지어냈다**. 질문의 날짜에 000001 을 붙여
 조립하거나(20230310000001), 13자리를 넣거나, 시스템 프롬프트 예시에 있던
@@ -41,16 +55,19 @@ MAX_LIMIT = 500
 RCEPT_LEN = 14
 FIX_HINT = ("접수번호를 추측하지 말고 list_disclosures(corp_name=...) 로 "
             "먼저 목록을 조회해 실제 접수번호를 확인하라")
+NEXT_HINT = ("이것은 문서 목록이며 내용이 아니다. 내용을 확인하려면 results 에서 "
+             "rcept_no 를 골라 search_disclosure(rcept_no=..., query=...) 를 호출하라")
 
 _DOCS = None
 _SERIES_MAX = None
 _BY_RCEPT = None
 _FY_SPAN = None
+_FY_GROUPS = None
 
 
 def _load():
     """manifest 를 한 번만 읽는다. 계열별 최신 접수번호도 같이 만들어 둔다."""
-    global _DOCS, _SERIES_MAX, _BY_RCEPT, _FY_SPAN
+    global _DOCS, _SERIES_MAX, _BY_RCEPT, _FY_SPAN, _FY_GROUPS
     if _DOCS is not None:
         return _DOCS, _SERIES_MAX
     docs = []
@@ -69,6 +86,14 @@ def _load():
         if rc > smax.get(k, ""):
             smax[k] = rc
     _BY_RCEPT = {str(d.get("rcept_no") or ""): d for d in docs}
+    # 어느 doc_group 이 사업연도를 갖는지 **실측**한다. 상수로 박으면 데이터가
+    # 바뀌었을 때 안내가 거짓말이 된다.
+    seen: dict = {}
+    for d in docs:
+        g = str(d.get("doc_group") or "")
+        has = isinstance(d.get("_fy"), int) and d["_fy"] > 0
+        seen[g] = seen.get(g, False) or has
+    _FY_GROUPS = {g for g, has in seen.items() if has}
     # 코퍼스가 담고 있는 사업연도 범위. 상수로 박지 않고 manifest 에서 구한다 —
     # 데이터가 바뀌면 안내 문구도 같이 바뀌어야 한다.
     years = [d["_fy"] for d in docs if isinstance(d.get("_fy"), int) and d["_fy"] > 0]
@@ -81,6 +106,23 @@ def fiscal_span() -> tuple:
     """코퍼스가 담고 있는 사업연도 (최소, 최대)."""
     _load()
     return _FY_SPAN
+
+
+def fy_groups() -> set:
+    """사업연도를 갖는 doc_group 들. 실측값이다(periodic 뿐)."""
+    _load()
+    return set(_FY_GROUPS)
+
+
+def group_counts(stock_code: str) -> dict:
+    """그 회사가 doc_group 별로 몇 건을 갖고 있는지. 0건 안내에 쓴다."""
+    docs, _ = _load()
+    out: dict = {}
+    for d in docs:
+        if str(d.get("stock_code")) == str(stock_code):
+            g = str(d.get("doc_group") or "")
+            out[g] = out.get(g, 0) + 1
+    return out
 
 
 def rcept_problem(value):
@@ -168,6 +210,26 @@ def list_disclosures(corp_name=None, doc_group=None, fiscal_year=None,
             notes.append(f"회사: {r['corp_name']}({code})")
         if doc_group:
             want = {doc_group} if isinstance(doc_group, str) else set(doc_group)
+            # (a) 사업연도가 없는 doc_group 에 fiscal_year 를 걸면 언제나 0건이다.
+            #     not_found 로 넘기면 모델이 이유를 모른 채 포기한다.
+            if fiscal_year is not None and not (want & fy_groups()):
+                ok = ", ".join(sorted(fy_groups())) or "없음"
+                out["status"] = "error"
+                out["note"] = (
+                    f"{'/'.join(sorted(want))}(거래소 수시공시·주요사항보고서 등) 문서는 "
+                    f"사업연도가 없다. fiscal_year 를 빼고 date_from/date_to 로 기간을 "
+                    f"지정하라. fiscal_year 를 쓸 수 있는 것은 {ok} 뿐이다")
+                return out
+            # (b) 그 회사가 그 종류를 아예 안 갖고 있으면 보유 현황을 알려준다
+            if corp_name and not any(d.get("doc_group") in want for d in sel):
+                have = group_counts(code)
+                out["status"] = "not_found"
+                out["note"] = (
+                    f"{r['corp_name']} 은 {'/'.join(sorted(want))} 문서가 없다. "
+                    f"보유 현황: "
+                    + " / ".join(f"{g} {n}" for g, n in sorted(have.items()))
+                    + ". 다른 doc_group 으로 다시 시도하라")
+                return out
             sel = [d for d in sel if d.get("doc_group") in want]
         if fiscal_year is not None:
             try:
@@ -219,6 +281,8 @@ def list_disclosures(corp_name=None, doc_group=None, fiscal_year=None,
     if total == 0:
         out["status"] = "not_found"
         notes.append("조건에 맞는 공시가 없다")
+    else:
+        notes.append(NEXT_HINT)          # 목록은 내용이 아니다 — 매번 붙인다
     out["note"] = " · ".join(notes)
     return out
 

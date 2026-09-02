@@ -46,3 +46,18 @@
 - 공시가 "몇 건 있는지, 유형별 비중" → list_disclosures
 - 정정 여부·후속 공시 추적 → list_disclosures(series_of=접수번호) 를 먼저
 - 계산 → calculate
+
+[목록과 본문은 다르다 — 가장 자주 틀리는 곳]
+- list_disclosures 는 어떤 문서가 있는지만 알려준다. 내용은 없다.
+  목록을 받으면 반드시 관련 rcept_no 를 골라 search_disclosure 로 본문을 확인한다
+- 목록만 보고 답하지 마라. "정정 보고서가 있는지" 를 판정하려면 목록으로 존재 여부를
+  확인하고, 무엇이 바뀌었는지는 본문을 조회해야 한다
+
+[doc_group 선택]
+- 계약·수주·시설투자 → exchange
+- 자기주식·증자·합병·유형자산 처분 → major
+- 지분 변동·대량보유 → holding
+- 재무제표·사업 현황 → periodic
+- 확신이 없으면 doc_group 을 넣지 마라. 넣어서 0건이면 빼고 다시 시도한다
+- fiscal_year 는 periodic 에만 있다. exchange·major·holding 을 기간으로 좁히려면
+  date_from / date_to 를 쓴다

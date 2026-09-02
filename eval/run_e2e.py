@@ -511,6 +511,7 @@ def run(items: list, out_path: Path, budget, sleep: float, model, deadline: floa
             "usage": res.get("usage") or {},
             "waste": res.get("waste") or {},
             "stopped_by_budget": bool(res.get("stopped_by_budget")),
+            "unsourced_claim": bool(res.get("unsourced_claim")),
             "note": res.get("note") or "",
             "elapsed": round(time.time() - t0, 2),
             "verdict": None,        # 사람이 채운다 — 자동 채점은 폐기했다
@@ -676,6 +677,7 @@ def report(rows: list, budget, run_name: str, pf: dict) -> str:
     other = [(r["qid"], cited_other_corp(r)) for r in rows if cited_other_corp(r)]
     refus = [(r["qid"], refusal_count(r.get("answer") or "")) for r in rows
              if refusal_count(r.get("answer") or "")]
+    unsourced = [r for r in rows if r.get("unsourced_claim")]
     L += ["## 수정 효과 집계", "",
           "| 항목 | 값 |", "|---|---|",
           f"| 도구 0회로 답한 문항 | **{len(no_tool)}**/{len(rows)} "
@@ -684,6 +686,8 @@ def report(rows: list, budget, run_name: str, pf: dict) -> str:
           f"| 타사 데이터를 근거로 단 문항 | **{len(other)}** "
           f"{[q for q, _ in other] if other else ''} |",
           f"| 항목별 거절을 밝힌 문항 | {len(refus)} (총 {sum(n for _, n in refus)}회) |",
+          f"| 근거 0건인데 단정한 문항(unsourced_claim) | **{len(unsourced)}** "
+          f"{[r['qid'] for r in unsourced] if unsourced else ''} |",
           ""]
 
     L += ["## 판정 (사람이 채운다)", "",
