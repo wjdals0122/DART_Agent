@@ -31,6 +31,7 @@ json.loads() 를 걸면 터진다. 그래도 문자열로 올 경우를 대비�
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 import traceback
@@ -59,12 +60,31 @@ FALLBACK = "공시에서 확인되지 않음"
 # 도구 결과가 들어온 직후면 다음 턴이 십중팔구 답변 턴이고, 아니어도 손해가 없다
 # (모델이 도구를 더 부르면 루프는 그냥 계속 돈다).
 REMINDER = "\n".join([
-    "위 자료만으로 답하라. 두 가지를 지켜라.",
-    "1) 사칙연산이 필요하면 암산하지 말고 calculate 도구를 부른다.",
-    "2) 답변 맨 끝에 '근거' 절을 두고, 각 문서의 source 속성을 "
-    "대괄호까지 글자 그대로 복사해 나열한다.",
-    "   예: - [삼성전자 사업보고서 (2024.12), 2025-03-11, 접수번호 20250311001085]",
+    "위 자료만으로 답하라.",
+    "사칙연산이 필요하면 암산하지 말고 calculate 도구를 부른다.",
 ])
+
+# 도구를 한 번도 안 부르고 바로 답하려는 경우에만 한 번 더 던지는 검토 지시.
+# 거절 답변에 '공개되지 않을 가능성이 높습니다', '관련 기관에 문의하세요' 같은
+# 공시 근거 없는 일반 지식이 붙는 걸 막는다. 시스템 프롬프트에 같은 규칙을 넣어
+# 봤지만 지켜지지 않았다(실측 2/2). 답을 본 뒤에 지적해야 먹힌다.
+REVIEW = (
+    "위 답변을 검토하라. 공시에서 확인되지 않는다고 밝힌 뒤에는 그 이유를 추측해 "
+    "설명하지 마라. '공개되지 않을 가능성이 높습니다', '관련 기관에 문의하세요', "
+    "'내부 회의록에서 확인할 수 있습니다' 같은 문장은 공시 근거가 없는 일반 지식이므로 "
+    "삭제하라. 확인되지 않는 항목은 한 문장으로 밝히고 끝낸다. "
+    "질문의 다른 항목 중 공시에서 확인되는 것이 있으면 그것만 이어서 답하라. "
+    "고쳐 쓴 답변 **본문만** 출력하라. '죄송합니다', '말씀하신 대로', "
+    "'수정된 답변은 다음과 같습니다', '다른 질문이 있으시면' 같은 말머리·맺음말을 "
+    "붙이지 마라. 검토했다는 사실 자체를 언급하지 마라."
+)
+
+# 답변 끝의 '근거' 목록을 찾아내는 규칙. 줄 머리가 '근거' 이고 그 아래가
+# '-' 나 '*' 로 시작하는 목록인 구간만 잡는다. 산문형 '근거: …' 는 건드리지 않는다.
+_GEUN = re.compile(r"\n[ \t]*(?:\*\*)?근거(?:\*\*)?[ \t]*:?[ \t]*\n"
+                   r"(?:[ \t]*[-*][^\n]*\n?)+\s*$")
+_RCEPT = re.compile(r"\d{14}")
+
 
 
 def _read(name: str) -> str:
@@ -161,6 +181,59 @@ def _summary(name: str, out: dict) -> str:
     return f"{n}건{extra}"
 
 
+def strip_sources_section(text: str) -> str:
+    """모델이 쓴 '근거' 목록을 떼어낸다. 형식이 흔들리므로 우리가 다시 붙인다."""
+    prev = None
+    out = text or ""
+    while prev != out:                     # 여러 번 붙였을 수도 있다
+        prev = out
+        out = _GEUN.sub("\n", out).rstrip()
+    return out
+
+
+def used_sources(text: str, sources: list) -> list:
+    """답변이 실제로 인용한 출처만 고른다.
+
+    접수번호(14자리)가 답변 본문에 있으면 '썼다' 로 본다. 하나도 안 맞으면
+    판단을 포기하고 전부 붙인다 — 근거가 없는 것보다 많은 게 낫다.
+    """
+    seen = _RCEPT.findall(text or "")
+    used = [s for s in sources if any(n in s for n in seen)]
+    return used or list(sources)
+
+
+def drop_baseless_geun(text: str) -> str:
+    """출처가 하나도 없는데 '근거:' 라고 주장하는 문단을 잘라낸다.
+
+    거절 답변에서 모델이 '근거: 상법 제391조에 따라…', '근거: 기업 내부 의사결정
+    과정의 보안을 위해…' 처럼 **라벨만 근거이고 내용은 일반 지식**인 문단을 붙인다.
+    프롬프트로 세 번 막아 봤지만 표현만 바꿔 가며 계속 나왔다(실측).
+    도구가 돌려준 출처가 하나도 없으면 '근거' 라고 부를 것 자체가 없으므로 여기서 끊는다.
+    """
+    paras = re.split(r"\n\s*\n", text or "")
+    kept = [p for p in paras
+            if not re.match(r"^\s*(?:\*\*)?근거(?:\*\*)?\s*[:：]", p)]
+    return "\n\n".join(kept).strip() or (text or "").strip()
+
+
+def attach_sources(text: str, sources: list) -> tuple:
+    """근거 절을 **파이썬이** 만들어 붙인다. (본문, 붙인 출처 목록).
+
+    LLM 에게 맡겼더니 출처가 둘 이상일 때 대괄호를 떼먹었다(실측 2/2).
+    형식이 흔들리면 채점에서 샌다. 문자열은 fmt_source() 가 만든 것을 그대로 쓴다.
+    """
+    body = strip_sources_section(text)
+    if not sources:
+        # 붙일 출처가 없다 = 도구가 아무것도 못 가져왔다. 그런 답에 '근거' 는 없다
+        return drop_baseless_geun(body), []
+    picked, out = used_sources(body, sources), []
+    for s in picked:                       # 순서를 지키며 중복 제거
+        if s not in out:
+            out.append(s)
+    lines = "\n".join(f"- {s}" for s in out)
+    return f"{body}\n\n근거\n{lines}", out
+
+
 # ---------------------------------------------------------------- 본체
 
 
@@ -177,6 +250,12 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
         out["note"] = f"루프 실패: {type(e).__name__}: {e}"
     if not (out.get("answer") or "").strip():
         out["answer"] = FALLBACK + (f" (사유: {out['note']})" if out.get("note") else "")
+    # 근거 절은 모델이 아니라 여기서 만든다. 형식이 흔들리면 안 된다
+    try:
+        out["answer"], out["sources"] = attach_sources(out["answer"], out.get("sources") or [])
+    except Exception as e:                     # noqa: BLE001 — 붙이다 죽으면 안 된다
+        traceback.print_exc(file=sys.stderr)
+        out["note"] = (out.get("note") or "") + f" · 근거 절 조립 실패: {e}"
     out["elapsed"] = round(time.time() - t0, 2)
     return out
 
@@ -191,6 +270,7 @@ def _run(question, out, t0, model, max_calls, deadline, verbose) -> dict:
     cache: dict = {}
     n_calls = 0
     reminded = False           # 리마인더는 딱 한 번만 넣는다
+    reviewed = False           # 도구 없이 답하는 경로의 검토도 딱 한 번만
 
     while True:
         over_time = (time.time() - t0) > deadline
@@ -207,7 +287,18 @@ def _run(question, out, t0, model, max_calls, deadline, verbose) -> dict:
             break
 
         calls = res.get("tool_calls") or []
-        if not calls or extra is None:
+        if not calls:
+            text = (res.get("text") or "").strip()
+            # 도구를 한 번도 안 부르고 바로 답하려는 경우에만 검토를 한 번 시킨다.
+            # 이 경로는 리마인더가 닿지 않아 거절 답변에 추측이 붙는다(실측).
+            if extra is not None and not reviewed and not out["tool_calls"]:
+                reviewed = True
+                msgs.append({"role": "assistant", "content": text})
+                msgs.append({"role": "user", "content": REVIEW})
+                continue
+            out["answer"] = text
+            break
+        if extra is None:
             out["answer"] = (res.get("text") or "").strip()
             break
 

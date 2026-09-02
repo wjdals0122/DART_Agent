@@ -138,6 +138,10 @@ def _source_label(src: dict) -> str:
             f"접수번호 {src['rcept_no']}]")
 
 
+# 근거 표기의 표준 포매터. 바깥에서 쓰는 이름은 이것이다.
+fmt_source = _source_label
+
+
 def _unit(section: str, text: str):
     for hay in (section, text[:UNIT_SCAN]):
         m = _UNIT.search(hay or "")

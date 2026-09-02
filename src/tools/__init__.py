@@ -86,12 +86,12 @@ def _search_disclosure(query=None, corp_name=None, fiscal_year=None, rcept_no=No
 
 def _sources(hits) -> list:
     """근거 표기에 쓸 source 문자열. 답변의 '근거' 절이 이걸 그대로 옮겨 적는다."""
-    from src.agent.context import _source_label
+    from src.agent.context import fmt_source
 
     out = []
     for h in hits:
         try:
-            lab = _source_label(h.get("source") or {})
+            lab = fmt_source(h.get("source") or {})
         except (KeyError, TypeError):
             continue
         if lab not in out:
