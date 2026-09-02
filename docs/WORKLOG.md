@@ -2866,3 +2866,69 @@ HD현대일렉트릭이 exchange 목록 15건을 받은 뒤 **접수번호를 �
 OCI홀딩스는 목록 59건만 보고 "2020년 5월 9일 … 언급될 가능성이 있음" 처럼
 추측을 서술했는데 `unsourced_claim` 이 안 붙었다. 숫자가 연도뿐이라
 (연도는 제외 규칙) 걸리지 않았다. 표시 규칙의 한계다.
+
+### 9/4 서버 대비 — 기동이 죽는 자리를 미리 막았다 (2026-09-02)
+
+"dense 를 GPU 에 올린 뒤 임베딩 모델 초기화에서 프로세스가 종료된다"를 재현하려
+했으나 **다섯 조건 모두에서 안 죽었다** — 평범한 로드, `HF_HUB_OFFLINE=1`,
+백그라운드 스레드, 프로세스 2개 동시(각 2.8GB, 합계 5.6GB). 지금 GPU0 은 0MiB
+사용에 24GB 여유, RAM 385GB 여유, 경쟁 프로세스 없음이다.
+
+재현은 못 했지만 **죽을 수 있는 자리 네 곳**을 찾아 막았다.
+
+#### 1. 모델을 매번 huggingface.co 에서 확인하고 있었다
+
+`paths.MODEL_NAME` 은 `"BAAI/bge-m3"`, 로컬 경로가 아니라 저장소 id 다.
+기동할 때마다 `Fetching 30 files` 로 네트워크를 친다. 지금 도는 이유는
+`~/.cache/huggingface/hub` 에 4.59GB 가 이미 있어서일 뿐이다.
+
+`src/search/hf_cache.py` 를 만들어 `_load_model()` 직전에 부른다.
+**캐시를 먼저 확인하고, 있을 때만 `HF_HUB_OFFLINE=1` 을 건다.** 없는데 걸면
+받을 길이 막히므로 순서가 중요하다. 없으면 조용히 멈추지 않고 경로와 고치는 법을
+적어 `SystemExit` 로 죽는다.
+
+환경변수를 늦게 걸면 안 먹는 함정이 있다 — `huggingface_hub.constants.HF_HUB_OFFLINE`
+은 import 할 때 한 번만 읽힌다. 이미 올라와 있으면 모듈 속성까지 같이 바꾼다.
+
+#### 2. 이 PC 는 부팅할 때 MITM 프록시가 뜬다
+
+시작프로그램 폴더의 `start_proxy.bat` 이 `mitmdump --listen-port 3128` 을 띄운다
+(2025-07-01 등록, 이 프로젝트와 무관). 지금은 `HTTPS_PROXY` 가 안 잡혀 있어
+무해하지만, 잡히는 순간 HF 가 TLS 검증에 실패해 **모델 초기화에서 죽는다** —
+증상이 정확히 일치한다.
+
+`scripts/serve.bat` 이 기동 때 프록시 변수를 **명시적으로 비운다**.
+남이 잡아 둔 값이 상속되지 않게.
+
+#### 3. gpu_guard 가 항상 0번에 상한을 걸고 있었다
+
+`apply_memory_fraction(physical, ...)` 이 인자를 무시하고
+`set_per_process_memory_fraction(fraction, 0)` 이었다. `select_gpu()` 를 먼저 부르는
+경로에서는 `CUDA_VISIBLE_DEVICES` 로 한 장만 보여 0 이 맞다. 그런데
+`src/search/hybrid.py` 는 `select_gpu` 를 안 거치므로 `gpu=1` 을 줘도 0번에 걸렸다.
+
+`torch_index()` 를 새로 두어 두 경우를 구분한다 —
+`CUDA_VISIBLE_DEVICES` 가 있으면 그 목록에서의 위치, 없으면 물리 번호가 곧 인덱스.
+
+**남은 문제(안 고침)**: `hybrid` 는 dense 를 언제나 문자열 `"cuda"`(= 0번)에 올린다.
+`Retriever(gpu=1)` 을 줘도 데이터는 0번으로 간다 — `gpu` 인자가 사실상 장식이다.
+마감 이틀 전이라 배치 로직은 건드리지 않고 기록만 남긴다.
+
+#### 4. 두 벌 로드
+
+`Retriever()` 를 직접 만들고 `get_searcher()` 도 부르면 인덱스와 모델이 통째로
+두 벌 올라간다(실측 GPU 1.26 → 2.52GB). `_INSTANCE` 가 아니라 **만든 횟수**를 세서
+두 번째부터 경고한다 — 직접 만든 뒤 `get_searcher()` 를 부르는 순서에서는
+그 시점 `_INSTANCE` 가 아직 None 이라 못 잡는다.
+
+직접 만드는 곳은 전부 일회성 CLI 다(`label_helper` `quick_qa` `run_eval`
+`show_chunks` `test_retriever`). 한 프로세스에서 둘을 섞는 코드는 없어서
+지금 당장 이중 로드가 나지는 않는다. 스크립트는 건드리지 않았다.
+
+#### 기동 전 점검 — `scripts/preflight.py`
+
+인덱스를 올리지 않고 1초 안에 끝난다. 프록시 변수 / 모델 캐시 / 인덱스 파일 /
+GPU 여유 / API 키 다섯 가지를 보고 막힌 것이 있으면 **고치는 법과 함께** 1 로 죽는다.
+`scripts/serve.bat` 이 서버를 띄우기 전에 이걸 먼저 통과시킨다.
+
+`--warmup` 을 붙이면 실제로 35초 올려 본다.

@@ -155,13 +155,39 @@ def select_gpu(physical: int) -> None:
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 
+def torch_index(physical: int) -> int:
+    """물리 GPU 번호 → torch 가 보는 인덱스.
+
+    select_gpu() 를 먼저 불렀으면 CUDA_VISIBLE_DEVICES 로 한 장만 보이므로 torch
+    인덱스는 언제나 0 이다. 안 불렀으면 전부 보이므로 물리 번호가 곧 인덱스다.
+    예전엔 0 을 그냥 박아 뒀는데, select_gpu 를 안 거치는 경로(src/search/hybrid.py)
+    에서는 gpu=1 을 줘도 0 번에 상한이 걸렸다.
+    """
+    vis = (os.environ.get("CUDA_VISIBLE_DEVICES") or "").strip()
+    if not vis:
+        return int(physical)
+    ids = [x.strip() for x in vis.split(",") if x.strip()]
+    try:
+        return ids.index(str(physical))
+    except ValueError:
+        print(f"[gpu_guard] GPU {physical} 은 CUDA_VISIBLE_DEVICES={vis} 에 없다 — "
+              f"보이는 첫 장치에 건다", file=sys.stderr)
+        return 0
+
+
 def apply_memory_fraction(physical: int, fraction: float | None = None) -> float:
     """select_gpu + torch import 이후에 호출. 디스플레이 GPU면 기본으로 상한을 건다."""
     import torch
 
     if fraction is None:
         fraction = 0.8 if physical == DISPLAY_GPU else 0.9
-    torch.cuda.set_per_process_memory_fraction(fraction, 0)
+    idx = torch_index(physical)
+    n = torch.cuda.device_count()
+    if idx >= n:
+        print(f"[gpu_guard] torch 가 보는 GPU 는 {n}장인데 인덱스 {idx} 를 요구했다 — "
+              f"0 번에 건다", file=sys.stderr)
+        idx = 0
+    torch.cuda.set_per_process_memory_fraction(fraction, idx)
     return fraction
 
 

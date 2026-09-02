@@ -56,6 +56,7 @@ AUG_HEAD = "[인접 청크에서 보강: 단위·제목]"
 AUG_NEXT = "[인접 청크에서 보강: 다음 청크의 표]"
 AUG_BODY = "[여기부터 검색된 청크 원문]"
 _NONDIGIT = re.compile(r"[^0-9]")
+_BUILT = 0          # 이 프로세스에서 Retriever 를 몇 번 만들었나
 _FY = re.compile(r"\((\d{4})[.\-/](\d{1,2})\)")
 
 
@@ -202,6 +203,16 @@ def _norm_report_type(v):
 
 class Retriever:
     def __init__(self, device: str = "cuda", gpu: int = 0, verbose: bool = True) -> None:
+        # 한 프로세스에서 두 번 만들면 dense 와 임베딩 모델이 통째로 두 벌 올라간다
+        # (실측: GPU 1.26GB → 2.52GB, 모델 로드 2회). 서버는 get_searcher() 만 써야 한다.
+        # _INSTANCE 가 아니라 만든 횟수를 센다 — 직접 만든 뒤 get_searcher() 를 부르는
+        # 순서에서도 잡아야 한다(그때 _INSTANCE 는 아직 None 이다).
+        global _BUILT
+        _BUILT += 1
+        if _BUILT > 1:
+            print(f"[hybrid] Retriever 를 {_BUILT}번째 만들고 있다. 인덱스와 임베딩 "
+                  f"모델이 그만큼 올라간다 — get_searcher() 로 하나만 쓸 것",
+                  file=sys.stderr)
         self.device = device
         self.gpu = gpu
         self._verbose = verbose
@@ -298,6 +309,13 @@ class Retriever:
 
     def _load_model(self) -> None:
         t = time.time()
+        # 네트워크를 치지 않게 먼저 막는다. 캐시가 없으면 여기서 이유를 적고 죽는다 —
+        # dense 를 GPU 에 올린 뒤 모델 초기화에서 조용히 멈추는 것이 제일 나쁘다.
+        from src.search import hf_cache
+
+        snap = hf_cache.ensure_offline(paths.MODEL_NAME)
+        self._log(f"[load] 모델 캐시 {snap}")
+
         from FlagEmbedding import BGEM3FlagModel
 
         self.model = BGEM3FlagModel(
