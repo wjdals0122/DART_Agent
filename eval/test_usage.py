@@ -7,6 +7,7 @@
   2. usage 가 없는 응답을 0 으로 채우지 않는가 (안 썼다 ≠ 모른다)
   3. 예산을 넘으면 **문항 중간에도** 멈추는가
   4. 낭비 신호(재호출 차단 / error 뒤 재시도 / 6회 한도 / 429)를 세는가
+  7. 조회 없이 답하려 하면 FORCE_TOOL 로 되돌리는가
   5. 로그가 한 줄씩 append 되고 다시 읽히는가
   6. run_e2e 의 문항 적재·표본·예상치가 도는가
 
@@ -193,9 +194,10 @@ def main() -> int:
     res = loop.answer("질문", deadline=60)
     clova.chat = real_chat
     w, n = res["waste"], res["usage"]["llm_calls"]
-    # 도구를 한 번도 안 부르는 답변은 loop 가 REVIEW 로 한 번 더 부른다(실측 2회).
-    # 그래서 호출 수에 비례해 쌓이는지를 본다 — 상수로 박으면 그 경로를 못 본다.
-    check("도구 없는 답변은 REVIEW 때문에 LLM 을 2회 부른다", n == 2, f"{n}회")
+    # 도구를 한 번도 안 부르는 답변은 loop 가 두 번 되돌린다 —
+    # FORCE_TOOL(조회부터 하라) 다음 REVIEW(추측을 걷어내라). 그래서 3회다.
+    # 호출 수에 비례해 쌓이는지를 본다 — 상수로 박으면 그 경로를 못 본다.
+    check("도구 없는 답변은 FORCE_TOOL+REVIEW 로 LLM 을 3회 부른다", n == 3, f"{n}회")
     check("429 재시도 횟수를 센다", w["retry_429"] == 2 * n,
           f"{w['retry_429']} (호출 {n}회 × 2)")
     check("대기 시간을 센다", w["retry_wait_s"] == 18.0 * n,

@@ -75,6 +75,21 @@ REMINDER = "\n".join([
     "사칙연산이 필요하면 암산하지 말고 calculate 도구를 부른다.",
 ])
 
+# 도구를 한 번도 안 부르고 답하려 할 때 **먼저** 던지는 지시.
+#
+# 【왜 프롬프트가 아니라 여기인가】
+# system.txt 에 "도구를 부르지 않고 답하지 마라" 가 이미 있는데 지켜지지 않았다.
+# e2e 첫 실행에서 두산에너빌리티 문항이 도구 0회로 "공시에서 확인되지 않습니다" 를
+# 냈다. 조회를 안 했으니 확인될 리가 없다. 규칙 문장으로 세 번 막아도 새어 나오는
+# 것은 코드에서 정한다(이 리포의 반복된 교훈).
+#
+# 한 번만 붙인다. 그래도 안 부르면 그대로 진행한다 — 무한히 조를 수는 없다.
+FORCE_TOOL = (
+    "아직 공시를 조회하지 않았다. 답하기 전에 반드시 search_disclosure 또는 "
+    "list_disclosures 를 호출해 근거를 확보하라. 조회 결과 근거가 없으면 "
+    "그때 '공시에서 확인되지 않음'이라고 답한다."
+)
+
 # 도구를 한 번도 안 부르고 바로 답하려는 경우에만 한 번 더 던지는 검토 지시.
 # 거절 답변에 '공개되지 않을 가능성이 높습니다', '관련 기관에 문의하세요' 같은
 # 공시 근거 없는 일반 지식이 붙는 걸 막는다. 시스템 프롬프트에 같은 규칙을 넣어
@@ -263,7 +278,8 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
            # est_won 은 입력·출력 단가가 다르므로 총 토큰이 아니라 내역으로 계산한다
            "waste": {"repeat_blocked": 0, "retry_after_bad": 0,
                      "hit_call_limit": False, "http_retry": 0, "retry_429": 0,
-                     "retry_wait_s": 0.0, "resent_prompt_tokens_est": 0},
+                     "retry_wait_s": 0.0, "resent_prompt_tokens_est": 0,
+                     "no_tool_nudge": False, "answered_without_tools": False},
            "stopped_by_budget": False}
     try:
         out = _run(question, out, t0, model, max_tool_calls, deadline, verbose, qid)
@@ -331,6 +347,7 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
     n_calls = 0
     reminded = False           # 리마인더는 딱 한 번만 넣는다
     reviewed = False           # 도구 없이 답하는 경로의 검토도 딱 한 번만
+    nudged = False             # 조회 없이 답하려는 것을 되돌리는 지시도 한 번만
     bad_tools: set = set()     # 직전 턴에 error/not_found 를 돌려준 도구 이름
 
     while True:
@@ -358,14 +375,24 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
         calls = res.get("tool_calls") or []
         if not calls:
             text = (res.get("text") or "").strip()
-            # 도구를 한 번도 안 부르고 바로 답하려는 경우에만 검토를 한 번 시킨다.
-            # 이 경로는 리마인더가 닿지 않아 거절 답변에 추측이 붙는다(실측).
-            if extra is not None and not reviewed and not out["tool_calls"]:
-                reviewed = True
-                msgs.append({"role": "assistant", "content": text})
-                msgs.append({"role": "user", "content": REVIEW})
-                continue
+            # 아직 도구를 한 번도 안 불렀다면 두 번까지 되돌린다.
+            #   1) FORCE_TOOL — 조회부터 하라 (근거 없는 거절을 막는다)
+            #   2) REVIEW     — 그래도 도구 없이 답하면 추측 문장만이라도 걷어낸다
+            if extra is not None and not out["tool_calls"]:
+                if not nudged:
+                    nudged = True
+                    out["waste"]["no_tool_nudge"] = True
+                    msgs.append({"role": "assistant", "content": text})
+                    msgs.append({"role": "user", "content": FORCE_TOOL})
+                    continue
+                if not reviewed:
+                    reviewed = True
+                    msgs.append({"role": "assistant", "content": text})
+                    msgs.append({"role": "user", "content": REVIEW})
+                    continue
             out["answer"] = text
+            if not out["tool_calls"]:
+                out["waste"]["answered_without_tools"] = True
             break
         if extra is None:
             out["answer"] = (res.get("text") or "").strip()

@@ -81,6 +81,78 @@ DEFAULT_MAX_COST = 5000.0
 _NUM = re.compile(r"\d[\d,]{2,}(?:\.\d+)?")
 
 
+# ---------------------------------------------------------------- 회사명 주입
+#
+# 【왜 필요한가 — 실측】
+# 벤치 문항 208/240(87%)이 질문 안에 회사명을 적지 않는다. `doc_info` 로 대상
+# 문서가 이미 정해진 상태를 전제하고 쓰였기 때문이다("이 보고서", "이 회사").
+# 회사를 모르는 질문을 그대로 던지면 Agent 가 회사를 특정하지 못하고,
+# 그걸 Agent 실패로 기록하게 된다. 실제로 첫 실행에서 3/5 가 그렇게 죽었다.
+#
+# 【무엇을 주고 무엇을 안 주는가】
+# 회사명만 준다. `doc_info` 의 접수번호·보고서명은 **주지 않는다** —
+# 문서를 찾는 일은 Agent 몫으로 남겨야 검색을 평가할 수 있다.
+#
+# 【규칙 — 단순하게, 그리고 되돌아볼 수 있게】
+#   (A) 회사명·별칭이 질문에 이미 있으면 그대로 둔다
+#   (B) 없으면 "{회사}에 대해 묻습니다. " 를 문장 앞에 붙인다
+# 조사(이/가, 은/는, 의)를 붙여 주어 자리에 녹이는 방법도 있지만, 문항마다
+# 첫 어절 품사가 달라("제50기 …", "「II. 사업의 내용 …」", "지금 걸려 있는 …")
+# 규칙이 틀리면 질문 뜻이 바뀐다. 뜻을 건드리지 않는 쪽을 골랐다.
+# 변환 전후는 reports/e2e_question_rewrite.md 에 전량 남긴다.
+
+RULE_KEEP = "그대로 (회사명이 이미 있다)"
+RULE_PREFIX = "앞에 붙임"
+
+
+def _alias_set(corp: str) -> set:
+    """그 회사를 가리키는 이름들. 못 찾으면 회사명 하나만 돌려준다."""
+    names = {corp}
+    try:
+        from src.search.aliases import all_companies, resolve_company
+
+        r = resolve_company(corp)
+        if r.get("status") == "ok":
+            code = str(r.get("stock_code"))
+            names.add(str(r.get("corp_name") or ""))
+            names.add(str(r.get("listed_name") or ""))
+            for c in all_companies():
+                if str(c.get("stock_code")) == code:
+                    names.update(str(a) for a in (c.get("aliases") or []))
+    except Exception as e:                 # noqa: BLE001 — 별칭을 못 읽어도 진행한다
+        print(f"[주입] 별칭을 읽지 못했다({type(e).__name__}: {e}) — 회사명만 본다",
+              file=sys.stderr)
+    return {n for n in names if n}
+
+
+def inject_company(question: str, corp: str) -> tuple:
+    """(바뀐 질문, 적용한 규칙)."""
+    q = question or ""
+    for n in _alias_set(corp):
+        if n in q:
+            return q, RULE_KEEP
+    return f"{corp}에 대해 묻습니다. {q}", RULE_PREFIX
+
+
+def write_rewrite_report(items: list, path=None) -> Path:
+    """변환 전후 전량. 사람이 눈으로 확인할 파일."""
+    path = path or (REPORTS / "e2e_question_rewrite.md")
+    n_pre = sum(1 for x in items if x["inject_rule"] == RULE_PREFIX)
+    L = ["# 문항 회사명 주입 — 변환 전후", "",
+         f"문항 {len(items)}건 · 앞에 붙임 {n_pre}건 · 그대로 {len(items) - n_pre}건", "",
+         "규칙",
+         f"- **{RULE_KEEP}**: 회사명이나 별칭이 질문 안에 이미 있으면 손대지 않는다",
+         f"- **{RULE_PREFIX}**: 없으면 `{{회사}}에 대해 묻습니다. ` 를 앞에 붙인다",
+         "",
+         "`doc_info`(접수번호·보고서명)는 주지 않는다 — 문서 탐색은 Agent 몫이다.", ""]
+    for x in items:
+        L += [f"## {x['qid']}  ({x['inject_rule']})", "",
+              f"- **전**: {x['question_raw']}", f"- **후**: {x['question']}", ""]
+    REPORTS.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(L), encoding="utf-8", newline="\n")
+    return path
+
+
 # ---------------------------------------------------------------- 문항 적재
 
 
@@ -129,8 +201,10 @@ def load_items() -> tuple:
             if not q:
                 warn.append(f"{f.name}:{qtype} 에 query 가 없다 — 건너뛴다")
                 continue
+            q2, rule = inject_company(q, corp)
             items.append({"qid": f"{corp}__{qtype}", "corp": corp, "qtype": qtype,
-                          "question": q, "ground_truth": gt,
+                          "question": q2, "question_raw": q, "inject_rule": rule,
+                          "ground_truth": gt,
                           "doc_info": d.get("doc_info") or "", "src_file": f.name})
     return items, warn
 
@@ -227,6 +301,95 @@ def numbers_hit(answer: str, ground_truth: str) -> dict:
             "ratio": round(len(hit) / len(want), 3) if want else None}
 
 
+# ------------------------------------------------- 진단 (전부 기계 판정 · 잠정)
+#
+# 아래 셋은 **채점이 아니다.** 사람이 볼 자리를 좁혀 주는 자동 분류다.
+# 서술형은 기계로 맞고 틀림을 가릴 수 없으므로 reports/e2e_review.md 로 넘긴다.
+
+BUCKET_SEARCH = "검색"
+BUCKET_PLAN = "계획"
+BUCKET_WRITE = "작문"
+BUCKET_OK = "-"
+
+
+def cited_other_corp(row: dict) -> list:
+    """근거로 단 출처 중 **질문의 회사가 아닌** 것. 타사 데이터 인용을 잡는다.
+
+    source 문자열은 `[회사명 보고서명 (…), 날짜, 접수번호 …]` 모양이라
+    앞쪽에 회사명이 온다. 별칭까지 보고 하나도 안 맞으면 타사로 센다.
+    """
+    names = _alias_set(row.get("corp") or "")
+    out = []
+    for src in row.get("sources") or []:
+        if not any(n in src for n in names):
+            out.append(src)
+    return out
+
+
+def refusal_count(answer: str) -> int:
+    """답변 안에서 '확인되지 않음' 류를 몇 번 밝혔는지. 항목별 거절을 세는 대용."""
+    a = answer or ""
+    return a.count("확인되지 않") + a.count("확인할 수 없") + a.count("기재되어 있지 않")
+
+
+def auto_pass(row: dict):
+    """닫힌 문항의 **잠정** 정오. 정답의 숫자 절반 이상이 답변에 있으면 통과로 본다.
+
+    서술형(숫자가 없는 정답)은 None — 못 잰다는 뜻이지 틀렸다는 뜻이 아니다.
+    """
+    r = (row.get("numbers_hit") or {}).get("ratio")
+    return None if r is None else (r >= 0.5)
+
+
+def bucket(row: dict) -> str:
+    """틀린 문항이 어디서 깨졌는지 셋으로 가른다(잠정).
+
+      검색 — 근거를 하나도 못 올렸다
+      계획 — 근거는 있는데 도구를 헤맸다(한도 도달·전부 실패·도구 0회)
+      작문 — 근거도 있고 도구도 정상인데 답이 안 맞는다
+    """
+    if auto_pass(row) is True:
+        return BUCKET_OK
+    w = row.get("waste") or {}
+    calls = row.get("tool_calls") or []
+    if not row.get("sources"):
+        if w.get("answered_without_tools") or not calls:
+            return BUCKET_PLAN          # 조회 자체를 안 했다 = 계획 문제
+        return BUCKET_SEARCH
+    if w.get("hit_call_limit") or all(
+            c.get("status") in ("error", "not_found") for c in calls):
+        return BUCKET_PLAN
+    return BUCKET_WRITE
+
+
+def write_review(rows: list, run_name: str) -> Path:
+    """사람이 채점할 파일. 질문·답변·정답을 나란히 둔다."""
+    L = [f"# e2e 사람 채점용 — {run_name}", "",
+         f"문항 {len(rows)}건. `verdict` 는 비어 있다 — 아래를 읽고 채운다.",
+         "숫자 일치는 기계가 센 힌트이고 점수가 아니다. 서술형은 숫자가 없다.", ""]
+    for r in sorted(rows, key=lambda x: (x["qtype"], x["qid"])):
+        nh = r.get("numbers_hit") or {}
+        L += [f"## {r['qid']}  [{r['qtype']}]", "",
+              f"- 도구 {r['n_tool_calls']}회 · 근거 {len(r.get('sources') or [])}건 "
+              f"· 숫자 {nh.get('hit')}/{nh.get('total')} · 자동분류 **{bucket(r)}**",
+              f"- 비용 {U.fmt_won((r.get('usage') or {}).get('est_won'))} "
+              f"· {r.get('elapsed')}초",
+              "", "**질문**", "", f"> {r.get('question', '')}", "",
+              "**Agent 답변**", "", "```", (r.get("answer") or "").strip(), "```", "",
+              "**정답(벤치)**", "", "```", (r.get("ground_truth") or "").strip(), "```",
+              "", "**출처**", ""]
+        for src in (r.get("sources") or []) or ["(없음)"]:
+            L.append(f"- {src}")
+        other = cited_other_corp(r)
+        if other:
+            L += ["", f"⚠ **타사 출처 {len(other)}건** — {other}"]
+        L += ["", "---", ""]
+    REPORTS.mkdir(parents=True, exist_ok=True)
+    path = REPORTS / f"{run_name}_review.md"
+    path.write_text("\n".join(L), encoding="utf-8", newline="\n")
+    return path
+
+
 # ---------------------------------------------------------------- 실행
 
 
@@ -307,8 +470,9 @@ def run(items: list, out_path: Path, budget, sleep: float, model, deadline: floa
                      max_tool_calls=max_tool_calls, qid=it["qid"])
         row = {
             "qid": it["qid"], "corp": it["corp"], "qtype": it["qtype"],
-            "question": it["question"], "ground_truth": it["ground_truth"],
-            "src_file": it["src_file"],
+            "question": it["question"], "question_raw": it.get("question_raw", ""),
+            "inject_rule": it.get("inject_rule", ""),
+            "ground_truth": it["ground_truth"], "src_file": it["src_file"],
             "answer": res.get("answer") or "",
             "sources": res.get("sources") or [],
             # arguments 와 note 를 반드시 남긴다. 실패를 검색/계획/작문 셋으로 가르려면
@@ -442,6 +606,48 @@ def report(rows: list, budget, run_name: str, pf: dict) -> str:
                  f"{sum(1 for x in g if not x['sources'])} |")
     L.append("")
 
+    # ── 자동 분류 (잠정)
+    b = Counter(bucket(r) for r in rows)
+    n_wrong = sum(v for k, v in b.items() if k != BUCKET_OK)
+    L += ["## 실패 3분류 (기계 판정 · 잠정)", "",
+          "| 통 | 문항 | 뜻 |", "|---|---|---|",
+          f"| 검색 | {b[BUCKET_SEARCH]} | 근거를 하나도 못 올렸다 |",
+          f"| 계획 | {b[BUCKET_PLAN]} | 도구를 헤맸다(한도 도달·전부 실패·조회 안 함) |",
+          f"| 작문 | {b[BUCKET_WRITE]} | 근거는 있는데 답이 안 맞는다 |",
+          f"| 통과 | {b[BUCKET_OK]} | 정답 숫자의 절반 이상이 답변에 있다 |", "",
+          f"틀린 것으로 분류된 문항 {n_wrong}/{len(rows)}.",
+          "**서술형은 숫자가 없어 기계로 가릴 수 없다** — 통과/실패를 그대로 믿지 말고",
+          f"`{REPORTS.name}/{run_name}_review.md` 를 사람이 읽어야 한다.", ""]
+
+    # ── 유형별 정오(잠정)
+    L += ["## 유형별 (잠정 정확도)", "",
+          "| 유형 | 문항 | 숫자 잴 수 있음 | 통과 | 통과율 | 못 재는 문항 |",
+          "|---|---|---|---|---|---|"]
+    for k in sorted(by):
+        g = by[k]
+        gradable = [x for x in g if auto_pass(x) is not None]
+        passed = [x for x in gradable if auto_pass(x)]
+        rate = f"{len(passed) / len(gradable) * 100:.0f}%" if gradable else "—"
+        L.append(f"| {k} | {len(g)} | {len(gradable)} | {len(passed)} | {rate} | "
+                 f"{len(g) - len(gradable)} |")
+    L.append("")
+
+    # ── [2][3][4] 수정 효과
+    no_tool = [r for r in rows if (r.get("waste") or {}).get("answered_without_tools")]
+    nudged = [r for r in rows if (r.get("waste") or {}).get("no_tool_nudge")]
+    other = [(r["qid"], cited_other_corp(r)) for r in rows if cited_other_corp(r)]
+    refus = [(r["qid"], refusal_count(r.get("answer") or "")) for r in rows
+             if refusal_count(r.get("answer") or "")]
+    L += ["## 수정 효과 집계", "",
+          "| 항목 | 값 |", "|---|---|",
+          f"| 도구 0회로 답한 문항 | **{len(no_tool)}**/{len(rows)} "
+          f"{[r['qid'] for r in no_tool] if no_tool else ''} |",
+          f"| 조회하라고 되돌린 문항(FORCE_TOOL) | {len(nudged)} |",
+          f"| 타사 데이터를 근거로 단 문항 | **{len(other)}** "
+          f"{[q for q, _ in other] if other else ''} |",
+          f"| 항목별 거절을 밝힌 문항 | {len(refus)} (총 {sum(n for _, n in refus)}회) |",
+          ""]
+
     L += ["## 채점", "",
           "`verdict` 는 비어 있다. 이 스크립트는 채점하지 않는다 — 자동 채점 방식이",
           "아직 정해지지 않았다. `numbers_hit` 은 정답의 숫자가 답변에 몇 개 들어 있는지를",
@@ -505,6 +711,12 @@ def main() -> int:
             print("[중단] 고정 표본이 비었다", file=sys.stderr)
             return 2
 
+    rw = write_rewrite_report(pool)
+    print(f"[주입] 회사명 주입 규칙: 앞에 붙임 "
+          f"{sum(1 for x in pool if x['inject_rule'] == RULE_PREFIX)}건 / "
+          f"그대로 {sum(1 for x in pool if x['inject_rule'] == RULE_KEEP)}건 "
+          f"· 전후 전량 {rw}")
+
     picked = sample(pool, a.n, a.types, a.corps, a.seed)
 
     run_name = a.run or ("e2e_" + time.strftime("%Y%m%d_%H%M%S"))
@@ -564,16 +776,19 @@ def main() -> int:
                         all_rows.append(json.loads(line))
                     except ValueError:
                         pass
-    md = report(all_rows or rows, budget, run_name, pf)
+    final = all_rows or rows
+    md = report(final, budget, run_name, pf)
     REPORTS.mkdir(parents=True, exist_ok=True)
     rp = REPORTS / f"{run_name}.md"
     rp.write_text(md, encoding="utf-8", newline="\n")
+    review = write_review(final, run_name)
 
     print(f"\n{BAR}")
     print(f"끝. {len(rows)}문항 실행 · {time.time() - t0:.0f}초")
     print(f"  {budget.line()}")
     print(f"  결과 {out_path}")
     print(f"  리포트 {rp}")
+    print(f"  사람 채점용 {review}")
     print(f"  누적 사용량: python eval/token_log.py --summary")
     print(BAR)
     return 0
