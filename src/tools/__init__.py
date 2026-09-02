@@ -1,0 +1,128 @@
+"""Agent 도구 레지스트리와 safe_tool 래퍼.
+
+【safe_tool 이 유일한 방어선이다】
+평가 중 도구에서 예외가 나면 그 문항은 0점이다(CLAUDE.md 규칙 10).
+LLM 은 스키마에 없는 인자를 지어내고, 문자열이어야 할 자리에 숫자를 넣고,
+필수 인자를 빼먹는다. 그걸 전부 여기서 흡수한다.
+
+  - 함수가 **kwargs 를 안 받으면 시그니처에 없는 키는 **버린다**
+  - TypeError -> {"status":"error","note":"인자 오류: ..."}
+  - 그 밖의 예외 -> traceback 은 stderr 로 남기고(규칙 9) 반환은 error dict
+  - 반환이 dict 가 아니거나 필수 키가 없으면 채워서 모양을 맞춘다
+
+  from src.tools import TOOLS
+  TOOLS["calculate"](expression="1+1")        # 항상 dict
+"""
+from __future__ import annotations
+
+import functools
+import inspect
+import sys
+import traceback
+
+from src.tools.calc import calculate as _calculate
+from src.tools.listing import list_disclosures as _list_disclosures
+
+BASE = ("status", "results", "sources", "note")
+MAX_TOP_K = 10
+
+
+def safe_tool(fn):
+    """어떤 입력에도 예외를 던지지 않는 함수로 감싼다."""
+    sig = inspect.signature(fn)
+    takes_kwargs = any(p.kind is p.VAR_KEYWORD for p in sig.parameters.values())
+    names = {n for n, p in sig.parameters.items()
+             if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)}
+
+    @functools.wraps(fn)
+    def wrapper(**kw):
+        dropped = []
+        if not takes_kwargs:
+            dropped = sorted(k for k in kw if k not in names)
+            kw = {k: v for k, v in kw.items() if k in names}
+        try:
+            out = fn(**kw)
+        except TypeError as e:
+            out = {"status": "error", "note": f"인자 오류: {e}"}
+        except Exception as e:                 # noqa: BLE001 — 여기가 마지막 방어선이다
+            traceback.print_exc(file=sys.stderr)
+            out = {"status": "error", "note": f"{type(e).__name__}: {e}"}
+
+        if not isinstance(out, dict):
+            out = {"status": "error", "note": f"도구가 dict 를 안 돌려줬다: {type(out).__name__}"}
+        for k in BASE:
+            out.setdefault(k, "" if k == "note" else ([] if k != "status" else "ok"))
+        if dropped:
+            out["note"] = (out["note"] + " · " if out["note"] else "") \
+                + f"모르는 인자를 버렸다: {dropped}"
+        return out
+
+    wrapper.__wrapped_name__ = fn.__name__
+    return wrapper
+
+
+# ---------------------------------------------------------------- 검색 · 회사 해석
+
+
+def _search_disclosure(query=None, corp_name=None, fiscal_year=None, rcept_no=None,
+                       rcept_dt=None, doc_group=None, top_k=5,
+                       include_superseded=False) -> dict:
+    """기존 Retriever 를 그대로 부른다. 인덱스가 무거우므로 여기서 늦게 임포트한다."""
+    from src.search.hybrid import get_searcher
+
+    if query is None or not str(query).strip():
+        return {"status": "error", "note": "query 가 비어 있다"}
+    try:
+        k = max(1, min(int(top_k), MAX_TOP_K))
+    except (TypeError, ValueError):
+        k = 5
+    res = get_searcher().search(str(query), corp_name=corp_name, fiscal_year=fiscal_year,
+                                rcept_no=rcept_no, rcept_dt=rcept_dt, doc_group=doc_group,
+                                top_k=k, include_superseded=bool(include_superseded))
+    res.pop("pool", None)                      # LLM 에게 줄 것이 아니다
+    res["sources"] = _sources(res.get("results") or [])
+    return res
+
+
+def _sources(hits) -> list:
+    """근거 표기에 쓸 source 문자열. 답변의 '근거' 절이 이걸 그대로 옮겨 적는다."""
+    from src.agent.context import _source_label
+
+    out = []
+    for h in hits:
+        try:
+            lab = _source_label(h.get("source") or {})
+        except (KeyError, TypeError):
+            continue
+        if lab not in out:
+            out.append(lab)
+    return out
+
+
+def _resolve_company(name=None) -> dict:
+    from src.search.aliases import resolve_company
+
+    if name is None or not str(name).strip():
+        return {"status": "error", "note": "name 이 비어 있다"}
+    r = dict(resolve_company(str(name)))
+    r.setdefault("note", "")
+    if r["status"] == "ok":
+        r["note"] = r["note"] or f"{r['corp_name']}(종목코드 {r['stock_code']}) 로 확정"
+    r["results"] = r.pop("candidates", [])
+    return r
+
+
+calculate = safe_tool(_calculate)
+list_disclosures = safe_tool(_list_disclosures)
+search_disclosure = safe_tool(_search_disclosure)
+resolve_company = safe_tool(_resolve_company)
+
+TOOLS = {
+    "search_disclosure": search_disclosure,
+    "list_disclosures": list_disclosures,
+    "calculate": calculate,
+    "resolve_company": resolve_company,
+}
+
+__all__ = ["TOOLS", "safe_tool", "calculate", "list_disclosures",
+           "search_disclosure", "resolve_company"]
