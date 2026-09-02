@@ -56,3 +56,8 @@ Question/'.env'
 
 # 인수인계 메모 — 로컬 전용, git 에 올리지 않는다
 HANDOFF.md
+
+# 토큰·비용 누적 로그와 e2e 실행 결과 — 로컬 운영 기록이라 git 에 올리지 않는다
+# 요약은 python eval/token_log.py --summary 로 본다
+eval/token_log.jsonl
+eval/e2e_runs/

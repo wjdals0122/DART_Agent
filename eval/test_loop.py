@@ -19,6 +19,10 @@ for _s in (sys.stdout, sys.stderr):
         _s.reconfigure(encoding="utf-8", errors="replace")
 
 from src.agent import clova, loop  # noqa: E402
+from src.agent import usage as usage_mod  # noqa: E402
+
+# 가짜 LLM 으로 도는 테스트다. 비용 로그(eval/token_log.jsonl)를 더럽히면 안 된다.
+usage_mod.set_enabled(False)
 from src.agent.loop import answer  # noqa: E402
 
 FAIL = []

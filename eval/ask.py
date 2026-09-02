@@ -27,9 +27,20 @@ def main() -> int:
     ap.add_argument("--model", default=None)
     ap.add_argument("--max-tool-calls", type=int, default=6)
     ap.add_argument("--deadline", type=float, default=60.0)
+    ap.add_argument("--qid", default=None,
+                    help="토큰 로그에 남길 문항 이름. 없으면 문항 단위 집계에서 빠진다")
+    ap.add_argument("--max-cost", type=float, default=None,
+                    help="추정 비용 상한(원). 넘으면 그 자리에서 멈춘다")
     a = ap.parse_args()
 
     from src.agent import clova
+    from src.agent import usage as U
+
+    # 모든 LLM 호출을 eval/token_log.jsonl 한 곳에 모은다(eval/token_log.py --summary)
+    U.set_context(script="ask", qid=a.qid)
+    if a.max_cost:
+        U.use_budget(U.Budget(limit_won=a.max_cost))
+
     key, err = clova.get_api_key()      # 인덱스 30초 올리기 전에 키부터 본다
     if err:
         print(f"[중단] {err}", file=sys.stderr)
@@ -41,7 +52,7 @@ def main() -> int:
     print(f"[warmup] {warmup():.1f}초 (답변 시간에 포함되지 않는다)")
 
     res = answer(a.question, model=a.model, max_tool_calls=a.max_tool_calls,
-                 deadline=a.deadline, verbose=a.verbose)
+                 deadline=a.deadline, verbose=a.verbose, qid=a.qid)
 
     if a.verbose and res.get("messages"):
         print(f"\n{BAR}\nLLM 에 들어간 프롬프트 전문\n{BAR}")
@@ -71,6 +82,21 @@ def main() -> int:
         print(f"\n{BAR}\n도구가 돌려준 출처 {len(res['sources'])}건\n{BAR}")
         for s in res["sources"]:
             print(f"  {s}")
+
+    u, w = res.get("usage") or {}, res.get("waste") or {}
+    print(f"\n{BAR}\n토큰·비용 (추정)\n{BAR}")
+    print(f"{u.get('total', 0):,} 토큰 "
+          f"(프롬프트 {u.get('prompt', 0):,} + 완성 {u.get('completion', 0):,}) "
+          f"· {U.fmt_won(U.won(u.get('total', 0)))} 추정 "
+          f"· LLM {u.get('llm_calls', 0)}회")
+    if u.get("unknown_calls"):
+        print(f"토큰을 알 수 없는 호출 {u['unknown_calls']}건 — 위 수치는 하한이다")
+    waste = [f"재호출 차단 {w.get('repeat_blocked', 0)}",
+             f"error 뒤 재시도 {w.get('retry_after_bad', 0)}",
+             f"429 재시도 {w.get('retry_429', 0)}"]
+    if w.get("hit_call_limit"):
+        waste.append("도구 6회 한도 도달")
+    print("낭비 신호: " + " · ".join(waste))
 
     print(f"\n{BAR}\n소요 시간\n{BAR}")
     print(f"총 {res['elapsed']:.2f}초 · LLM {res['llm_seconds']:.2f}초 "

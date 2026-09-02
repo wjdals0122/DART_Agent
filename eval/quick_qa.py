@@ -24,6 +24,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from src.agent import clova                       # noqa: E402
+from src.agent import usage as U                  # noqa: E402
 from src.agent.context import build_context, ensure_doc_map  # noqa: E402
 
 SYSTEM_PATH = ROOT / "prompts" / "system_min.txt"
@@ -143,6 +144,13 @@ def main() -> int:
     out = clova.chat(messages, max_tokens=a.max_tokens, temperature=a.temperature,
                      model=a.model)
     llm_s = time.time() - t1
+    # ask.py · run_e2e.py 와 같은 파일에 남긴다. 어디서 얼마나 썼는지 한 곳에서 본다
+    U.set_context(script="quick_qa")
+    U.record(model=out.get("model") or clova.resolve_model(a.model),
+             usage_dict=out.get("usage"), ok=out.get("ok"),
+             retries=out.get("retries", 0), retry_429=out.get("retry_429", 0),
+             retry_wait_s=out.get("retry_wait_s", 0.0), elapsed=out.get("elapsed"),
+             note="" if out.get("ok") else str(out.get("error") or "")[:200])
 
     print(BAR)
     print("3. LLM 응답 전문")

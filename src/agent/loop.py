@@ -27,6 +27,15 @@ json.loads() 를 걸면 터진다. 그래도 문자열로 올 경우를 대비�
 - 전체 60초. 넘으면 tools 없이 한 번 더 불러 **강제로 답을 받아낸다**
 - 같은 (도구, 인자) 재호출은 캐시를 주고 "이미 조회함" 을 붙인다.
   이게 없으면 못 찾은 질문에서 같은 검색을 끝없이 반복한다
+- **비용 상한**. `usage.use_budget()` 으로 예산을 걸어 두면 매 LLM 호출 **직전에**
+  확인하고, 넘었으면 그 자리에서 멈춘다(문항 경계까지 기다리지 않는다).
+  멈춘 사실은 `note` 와 `stopped_by_budget` 에 남는다
+
+【토큰·낭비 계측】
+반환 dict 에 `usage`(문항 단위 합계)와 `waste`(낭비 신호)가 들어 있다.
+호출 하나하나는 `usage.record()` 가 `eval/token_log.jsonl` 에 append 한다.
+`waste` 는 프롬프트·루프를 고칠 자리를 가리킨다 — 재호출 차단이 잦으면 검색어가
+안 바뀌는 것이고, 한도 도달이 잦으면 계획이 헤매는 것이다.
 """
 from __future__ import annotations
 
@@ -36,6 +45,8 @@ import sys
 import time
 import traceback
 from pathlib import Path
+
+from src.agent import usage as usage_mod
 
 ROOT = Path(__file__).resolve().parents[2]
 PROMPTS = ROOT / "prompts"
@@ -238,13 +249,23 @@ def attach_sources(text: str, sources: list) -> tuple:
 
 
 def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
-           deadline=DEADLINE, verbose=False) -> dict:
-    """질문 하나에 답한다. 어떤 경우에도 규격 dict 를 돌려준다."""
+           deadline=DEADLINE, verbose=False, qid=None) -> dict:
+    """질문 하나에 답한다. 어떤 경우에도 규격 dict 를 돌려준다.
+
+    `qid` 는 토큰 로그에 남길 문항 식별자다. 없으면 로그의 qid 가 null 이 되고
+    문항 단위 집계(평균 토큰 추정)에서 빠진다.
+    """
     t0 = time.time()
     out = {"answer": "", "sources": [], "tool_calls": [], "elapsed": 0.0,
-           "llm_seconds": 0.0, "tool_seconds": 0.0, "messages": [], "note": ""}
+           "llm_seconds": 0.0, "tool_seconds": 0.0, "messages": [], "note": "",
+           "usage": {"prompt": 0, "completion": 0, "total": 0,
+                     "llm_calls": 0, "unknown_calls": 0, "est_won": 0.0},
+           "waste": {"repeat_blocked": 0, "retry_after_bad": 0,
+                     "hit_call_limit": False, "http_retry": 0, "retry_429": 0,
+                     "retry_wait_s": 0.0, "resent_prompt_tokens_est": 0},
+           "stopped_by_budget": False}
     try:
-        out = _run(question, out, t0, model, max_tool_calls, deadline, verbose)
+        out = _run(question, out, t0, model, max_tool_calls, deadline, verbose, qid)
     except Exception as e:                     # noqa: BLE001 — 마지막 방어선
         traceback.print_exc(file=sys.stderr)
         out["note"] = f"루프 실패: {type(e).__name__}: {e}"
@@ -260,7 +281,43 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
     return out
 
 
-def _run(question, out, t0, model, max_calls, deadline, verbose) -> dict:
+def _account(out: dict, res: dict, model: str, qid) -> None:
+    """LLM 호출 1건을 문항 합계에 더하고 토큰 로그에 남긴다.
+
+    usage 가 없는 응답(실패·재시도 소진 등)은 0 으로 채우지 않고 `unknown_calls` 로
+    센다. "안 썼다" 와 "모른다" 를 섞으면 예산이 조용히 샌다.
+    """
+    row = usage_mod.record(
+        model=res.get("model") or model,
+        usage_dict=res.get("usage"),
+        qid=qid,
+        ok=bool(res.get("ok")),
+        retries=res.get("retries", 0),
+        retry_429=res.get("retry_429", 0),
+        retry_wait_s=res.get("retry_wait_s", 0.0),
+        elapsed=res.get("elapsed"),
+        note="" if res.get("ok") else str(res.get("error") or "")[:200],
+    )
+    u, w = out["usage"], out["waste"]
+    u["llm_calls"] += 1
+    if row["total"] is None:
+        u["unknown_calls"] += 1
+    else:
+        u["prompt"] += row["prompt_tokens"] or 0
+        u["completion"] += row["completion_tokens"] or 0
+        u["total"] += row["total"]
+        u["est_won"] = round(usage_mod.won(u["total"]), 2)
+
+    w["http_retry"] += row["retries"]
+    w["retry_429"] += row["retry_429"]
+    w["retry_wait_s"] = round(w["retry_wait_s"] + row["retry_wait_s"], 1)
+    # 재시도는 같은 본문을 다시 보낸다. 서버가 그것을 과금했는지는 알 수 없으므로
+    # '다시 보낸 프롬프트 토큰' 이라는 사실만 추정치로 남기고 비용에는 더하지 않는다.
+    if row["retries"] and row["prompt_tokens"]:
+        w["resent_prompt_tokens_est"] += row["retries"] * row["prompt_tokens"]
+
+
+def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> dict:
     from src.agent import clova
     from src.tools import TOOLS
 
@@ -271,8 +328,16 @@ def _run(question, out, t0, model, max_calls, deadline, verbose) -> dict:
     n_calls = 0
     reminded = False           # 리마인더는 딱 한 번만 넣는다
     reviewed = False           # 도구 없이 답하는 경로의 검토도 딱 한 번만
+    bad_tools: set = set()     # 직전 턴에 error/not_found 를 돌려준 도구 이름
 
     while True:
+        # 비용 상한 — LLM 을 부르기 **전에** 본다. 부르고 나서 보면 이미 쓴 뒤다.
+        budget = usage_mod.active_budget()
+        if budget is not None and budget.exceeded():
+            out["stopped_by_budget"] = True
+            out["note"] = "비용 상한 초과로 중단 — " + budget.line()
+            break
+
         over_time = (time.time() - t0) > deadline
         extra = None if (over_time or not tools) else {"tools": tools, "toolChoice": "auto"}
         if over_time and not out["note"]:
@@ -282,6 +347,7 @@ def _run(question, out, t0, model, max_calls, deadline, verbose) -> dict:
         res = clova.chat(msgs, max_tokens=MAX_TOKENS, temperature=TEMPERATURE,
                          model=model, extra=extra)
         out["llm_seconds"] += time.time() - t1
+        _account(out, res, clova.resolve_model(model), qid)
         if not res.get("ok"):
             out["note"] = f"LLM 호출 실패: {res.get('error')}"
             break
@@ -324,10 +390,17 @@ def _run(question, out, t0, model, max_calls, deadline, verbose) -> dict:
             else:
                 key = (name, json.dumps(args, ensure_ascii=False, sort_keys=True,
                                         default=str))
+                if name in bad_tools:
+                    # 앞 턴에서 error/not_found 를 받고 같은 도구를 다시 부른 것 =
+                    # 모델이 스스로 고쳐 재시도했다. 낭비는 아니지만, 잦으면
+                    # 검색어 규칙이나 도구 note 가 부족하다는 신호다.
+                    out["waste"]["retry_after_bad"] += 1
+                    bad_tools.discard(name)
                 if key in cache:
                     # 캐시 '결과' 를 다시 주면 안 된다. 같은 문서를 또 보여주면 모델이
                     # "아직 못 찾았다" 로 읽고 같은 호출을 반복한다(실측: 6회 중 2회 낭비).
                     # 결과 없이 error 로 끊어야 다음 단계로 넘어간다.
+                    out["waste"]["repeat_blocked"] += 1
                     tool_out = {"status": "error", "results": [], "sources": [],
                                 "note": "이미 같은 인자로 조회했다. 그 결과는 위 대화에 "
                                         "그대로 있다. 다시 부르지 말고, 다른 검색어·다른 "
@@ -337,6 +410,9 @@ def _run(question, out, t0, model, max_calls, deadline, verbose) -> dict:
                     tool_out = TOOLS[name](**args)
                     out["tool_seconds"] += time.time() - t2
                     cache[key] = tool_out
+
+            if tool_out.get("status") in ("error", "not_found"):
+                bad_tools.add(name)
 
             for s in (tool_out.get("sources") or []):
                 if s not in out["sources"]:
@@ -358,6 +434,7 @@ def _run(question, out, t0, model, max_calls, deadline, verbose) -> dict:
         if n_calls >= max_calls:
             # 다음 턴에는 도구를 주지 않는다 — 있는 근거로 답하게 한다
             tools = []
+            out["waste"]["hit_call_limit"] = True
             if not out["note"]:
                 out["note"] = f"도구 호출 {max_calls}회 한도에 도달해 답변 단계로 넘어갔다"
 

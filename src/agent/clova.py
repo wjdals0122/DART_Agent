@@ -185,7 +185,12 @@ def chat(messages, max_tokens: int = 1024, temperature: float = 0.1,
         return {"ok": False, "error": f"messages 형식 오류: {type(e).__name__}: {e}",
                 "status": None, "elapsed": 0.0}
 
+    # 재시도 계측. 429 는 요청이 거절된 것이라 usage 가 오지 않는다 —
+    # 몇 번 다시 보냈는지와 얼마나 기다렸는지만 사실로 남긴다.
+    # "그때 낭비된 토큰" 은 서버가 세었는지 알 수 없으므로 여기서 만들지 않는다.
     delay = BACKOFF0
+    n_retry = n_429 = 0
+    wait_s = 0.0
     for attempt in range(MAX_RETRY + 1):
         t0 = time.time()
         try:
@@ -194,8 +199,12 @@ def chat(messages, max_tokens: int = 1024, temperature: float = 0.1,
         except requests.RequestException as e:
             fail = {"ok": False, "status": None,
                     "elapsed": round(time.time() - t0, 2),
-                    "error": f"요청 실패: {type(e).__name__}: {e}"}
+                    "error": f"요청 실패: {type(e).__name__}: {e}",
+                    "retries": n_retry, "retry_429": n_429,
+                    "retry_wait_s": round(wait_s, 1)}
             if attempt < MAX_RETRY:
+                n_retry += 1
+                wait_s += delay
                 time.sleep(delay)
                 delay *= 2
                 continue
@@ -205,9 +214,17 @@ def chat(messages, max_tokens: int = 1024, temperature: float = 0.1,
         if r.status_code == 429 or r.status_code >= 500:
             fail = {"ok": False, "status": r.status_code, "elapsed": elapsed,
                     "error": f"HTTP {r.status_code} "
-                             f"(시도 {attempt + 1}/{MAX_RETRY + 1}): {r.text[:500]}"}
+                             f"(시도 {attempt + 1}/{MAX_RETRY + 1}): {r.text[:500]}",
+                    "retries": n_retry, "retry_429": n_429,
+                    "retry_wait_s": round(wait_s, 1)}
             if attempt < MAX_RETRY:
                 wait = max(delay, BACKOFF_429) if r.status_code == 429 else delay
+                n_retry += 1
+                if r.status_code == 429:
+                    n_429 += 1
+                wait_s += wait
+                fail["retries"], fail["retry_429"] = n_retry, n_429
+                fail["retry_wait_s"] = round(wait_s, 1)
                 time.sleep(wait)
                 delay = wait * 2
                 continue
@@ -215,7 +232,9 @@ def chat(messages, max_tokens: int = 1024, temperature: float = 0.1,
 
         if r.status_code != 200:
             return {"ok": False, "status": r.status_code, "elapsed": elapsed,
-                    "error": f"HTTP {r.status_code}: {r.text[:500]}"}
+                    "error": f"HTTP {r.status_code}: {r.text[:500]}",
+                    "retries": n_retry, "retry_429": n_429,
+                    "retry_wait_s": round(wait_s, 1)}
 
         try:
             raw = r.json()
@@ -241,9 +260,12 @@ def chat(messages, max_tokens: int = 1024, temperature: float = 0.1,
                 "status": r.status_code, "model": model,
                 "tool_calls": tool_calls,
                 "finish_reason": result.get("finishReason"),
-                "usage": result.get("usage")}
+                "usage": result.get("usage"),
+                "retries": n_retry, "retry_429": n_429,
+                "retry_wait_s": round(wait_s, 1)}
 
-    return {"ok": False, "error": "재시도 소진", "status": None, "elapsed": 0.0}
+    return {"ok": False, "error": "재시도 소진", "status": None, "elapsed": 0.0,
+            "retries": n_retry, "retry_429": n_429, "retry_wait_s": round(wait_s, 1)}
 
 
 def _main() -> int:
