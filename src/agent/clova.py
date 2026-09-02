@@ -57,8 +57,10 @@ REASONING_MODELS = {"HCX-007"}
 # .env 에 적어 둔 CLOVA_MODEL 이 조용히 무시된다. 실제로 그랬다.
 
 TIMEOUT = 60
-MAX_RETRY = 2          # 429/5xx 에 대해 지수 백오프로 2회까지
+MAX_RETRY = 3          # 429/5xx 에 대해 지수 백오프
 BACKOFF0 = 2.0
+# 레이트리밋은 서버가 창을 비워 줄 때까지 기다려야 한다. 2초·4초로는 못 넘긴다(실측).
+BACKOFF_429 = 6.0
 
 _env_loaded = False
 
@@ -128,9 +130,18 @@ def safe_headers(headers: dict) -> dict:
     return out
 
 
+# 도구 왕복에 필요한 키. role/content 만 넘기면 도구 결과가 통째로 사라진다.
+MSG_KEYS = ("role", "content", "toolCalls", "toolCallId", "name")
+
+
 def _norm_messages(messages) -> list:
-    # v3 는 content 로 문자열과 배열을 모두 받는다. 들어온 형태를 그대로 넘긴다.
-    return [{"role": m["role"], "content": m["content"]} for m in messages]
+    """v3 는 content 로 문자열과 배열을 모두 받는다. 들어온 형태를 그대로 넘긴다.
+
+    **toolCalls / toolCallId / name 을 빼면 안 된다.** 도구 호출 왕복이
+    그 키로 이어진다 — assistant 가 무엇을 불렀는지, 어느 호출의 결과인지가
+    거기에만 들어 있다. 예전엔 role/content 만 넘겨서 도구 결과가 사라졌다.
+    """
+    return [{k: m[k] for k in MSG_KEYS if k in m} for m in messages]
 
 
 def _extract_text(raw: dict):
@@ -196,8 +207,9 @@ def chat(messages, max_tokens: int = 1024, temperature: float = 0.1,
                     "error": f"HTTP {r.status_code} "
                              f"(시도 {attempt + 1}/{MAX_RETRY + 1}): {r.text[:500]}"}
             if attempt < MAX_RETRY:
-                time.sleep(delay)
-                delay *= 2
+                wait = max(delay, BACKOFF_429) if r.status_code == 429 else delay
+                time.sleep(wait)
+                delay = wait * 2
                 continue
             return fail
 
