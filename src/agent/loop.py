@@ -260,6 +260,7 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
            "llm_seconds": 0.0, "tool_seconds": 0.0, "messages": [], "note": "",
            "usage": {"prompt": 0, "completion": 0, "total": 0,
                      "llm_calls": 0, "unknown_calls": 0, "est_won": 0.0},
+           # est_won 은 입력·출력 단가가 다르므로 총 토큰이 아니라 내역으로 계산한다
            "waste": {"repeat_blocked": 0, "retry_after_bad": 0,
                      "hit_call_limit": False, "http_retry": 0, "retry_429": 0,
                      "retry_wait_s": 0.0, "resent_prompt_tokens_est": 0},
@@ -300,13 +301,15 @@ def _account(out: dict, res: dict, model: str, qid) -> None:
     )
     u, w = out["usage"], out["waste"]
     u["llm_calls"] += 1
-    if row["total"] is None:
+    if row["prompt_tokens"] is None or row["completion_tokens"] is None:
+        # 내역을 모르면 금액을 낼 수 없다. 출력 단가가 입력의 4배라 비율을 가정하면
+        # 그 추정이 최대 4배 틀린다. 0 으로 채우지 않고 '모른다' 로 센다.
         u["unknown_calls"] += 1
     else:
-        u["prompt"] += row["prompt_tokens"] or 0
-        u["completion"] += row["completion_tokens"] or 0
-        u["total"] += row["total"]
-        u["est_won"] = round(usage_mod.won(u["total"]), 2)
+        u["prompt"] += row["prompt_tokens"]
+        u["completion"] += row["completion_tokens"]
+        u["total"] = u["prompt"] + u["completion"]
+        u["est_won"] = round(usage_mod.won(u["prompt"], u["completion"]), 2)
 
     w["http_retry"] += row["retries"]
     w["retry_429"] += row["retry_429"]

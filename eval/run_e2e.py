@@ -17,6 +17,11 @@
   중간에 죽어도 거기까지는 남고 `--resume` 이 이어서 간다
 - 호출 하나하나는 `eval/token_log.jsonl` 에도 남는다(`eval/token_log.py --summary`)
 
+【비용은 입력·출력을 나눠서 센다】
+HCX-005 는 입력 1,000토큰 1.25원, 출력 1,000토큰 5원이다. **출력이 4배 비싸다.**
+이 Agent 는 도구 결과를 프롬프트에 계속 쌓으므로 입력 토큰이 압도적으로 많지만,
+출력이 조금만 길어져도 비용은 빨리 오른다. 리포트는 둘을 따로 보여준다.
+
 【채점은 여기서 하지 않는다】
 자동 채점 방식이 아직 정해지지 않았다. 이 스크립트는 **답변과 정답을 나란히 저장**하고,
 기계적으로 셀 수 있는 것 하나만 힌트로 남긴다 — 정답에 나오는 숫자가 답변에 몇 개
@@ -172,28 +177,43 @@ def numbers_hit(answer: str, ground_truth: str) -> dict:
 # ---------------------------------------------------------------- 실행
 
 
-def preflight(n_items: int, max_cost: float, avg_tokens) -> dict:
-    """예상 토큰·비용. 실측 평균이 있으면 그것을, 없으면 기본값을 쓴다."""
-    measured = avg_tokens is not None
-    per = avg_tokens if measured else U.DEFAULT_TOKENS_PER_ITEM
-    total = int(per * n_items)
-    return {"n": n_items, "per": per, "total": total, "won": U.won(total),
-            "measured": measured, "max_cost": max_cost}
+def preflight(n_items: int, max_cost: float, avg) -> dict:
+    """예상 토큰·비용. 입력과 출력을 나눠서 센다(출력 단가가 4배다).
+
+    `avg` 는 `usage.avg_split_per_item()` 의 결과(dict) 또는 None.
+    실측이 없으면 기본 가정을 쓰고, 가정이라는 사실을 화면에 밝힌다.
+    """
+    measured = bool(avg)
+    p = avg["prompt"] if measured else U.DEFAULT_PROMPT_PER_ITEM
+    c = avg["completion"] if measured else U.DEFAULT_COMPLETION_PER_ITEM
+    tp, tc = int(p * n_items), int(c * n_items)
+    return {"n": n_items, "prompt": p, "completion": c,
+            "total_prompt": tp, "total_completion": tc, "total": tp + tc,
+            "won": U.won(tp, tc), "measured": measured, "max_cost": max_cost,
+            "n_measured": avg["n"] if measured else 0}
 
 
 def print_preflight(pf: dict) -> None:
-    src = ("token_log.jsonl 실측 평균" if pf["measured"]
-           else f"기본 가정 {U.DEFAULT_TOKENS_PER_ITEM:,}토큰 — 실측 이력이 아직 없다")
+    src = (f"token_log.jsonl 실측 평균 (문항 {pf['n_measured']}건)" if pf["measured"]
+           else f"기본 가정 입력 {U.DEFAULT_PROMPT_PER_ITEM:,} + "
+                f"출력 {U.DEFAULT_COMPLETION_PER_ITEM:,} — 실측 이력이 아직 없다")
+    wp = pf["total_prompt"] * U.WON_PER_PROMPT_TOKEN
+    wc = pf["total_completion"] * U.WON_PER_COMPLETION_TOKEN
     print(f"{BAR}\n실행 전 예상치\n{BAR}")
-    print(f"  {pf['n']}문항 × 평균 {pf['per']:,.0f} 토큰 예상 "
-          f"= {pf['total']:,} 토큰 ≈ {U.fmt_won(pf['won'])}")
+    print(f"  {pf['n']}문항 × 평균 입력 {pf['prompt']:,.0f} + "
+          f"출력 {pf['completion']:,.0f} 토큰")
+    print(f"    입력 {pf['total_prompt']:,} 토큰 → {U.fmt_won(wp)}")
+    print(f"    출력 {pf['total_completion']:,} 토큰 → {U.fmt_won(wc)}")
+    print(f"    합계 {pf['total']:,} 토큰 ≈ **{U.fmt_won(pf['won'])}**")
     print(f"  근거: {src}")
     print(f"  상한: {U.fmt_won(pf['max_cost'])}")
     if pf["won"] > pf["max_cost"]:
         print(f"  ※ 예상치가 상한을 넘는다. 상한에 걸려 도중에 멈출 것이다 "
               f"(--max-cost 로 올리거나 --n 을 줄여라)")
-    print(f"\n  이 숫자는 추정이다 — {U.TOKENS_PER_UNIT:,} 토큰 = "
-          f"{U.fmt_won(U.WON_PER_UNIT)} 환산(확인된 요금표 아님)")
+    print(f"\n  {U.price_line()}")
+    if not pf["measured"]:
+        print("  ※ 문항당 토큰은 아직 **가정**이다. 한 번 돌리면 실측으로 바뀐다 — "
+              "먼저 --n 5 정도로 재보는 것을 권한다")
 
 
 def done_qids(path: Path) -> set:
@@ -255,7 +275,9 @@ def run(items: list, out_path: Path, budget, sleep: float, model, deadline: floa
 
         u = row["usage"]
         print(f"[{i}/{len(items)}] {it['qid']}  "
-              f"도구 {row['n_tool_calls']}회 · {u.get('total', 0):,} 토큰 · "
+              f"도구 {row['n_tool_calls']}회 · "
+              f"입력 {u.get('prompt', 0):,}/출력 {u.get('completion', 0):,} · "
+              f"{U.fmt_won(u.get('est_won'))} · "
               f"{row['elapsed']:.0f}초 · 누적 {U.fmt_won(budget.spent_won)}"
               + ("  ← 상한으로 중단됨" if row["stopped_by_budget"] else ""))
 
@@ -275,34 +297,47 @@ def report(rows: list, budget, run_name: str, pf: dict) -> str:
     L.append(f"실행 {time.strftime('%Y-%m-%dT%H:%M:%S')} · 문항 {len(rows)}건")
     L.append("")
 
-    tok = [r["usage"].get("total", 0) for r in rows]
-    total_tok = sum(tok)
+    tp = sum(r["usage"].get("prompt", 0) for r in rows)
+    tc = sum(r["usage"].get("completion", 0) for r in rows)
+    total_tok = tp + tc
     unknown = sum(r["usage"].get("unknown_calls", 0) for r in rows)
     llm_calls = sum(r["usage"].get("llm_calls", 0) for r in rows)
+    wp = tp * U.WON_PER_PROMPT_TOKEN
+    wc = tc * U.WON_PER_COMPLETION_TOKEN
 
     L += ["## 토큰·비용", "",
-          f"- 총 {total_tok:,} 토큰 · **{U.fmt_won(U.won(total_tok))} 추정**",
-          f"- LLM 호출 {llm_calls}회 · 문항당 평균 "
-          f"{(total_tok / len(rows)):,.0f} 토큰" if rows else "- (문항 없음)",
-          f"- 상한 {U.fmt_won(budget.limit_won)} · 남은 예산 "
-          f"{U.fmt_won(budget.remaining_won())}" if budget.limit_won else "- 상한 없음",
-          f"- 실행 전 예상 {pf['total']:,} 토큰 → 실제 {total_tok:,} 토큰 "
-          f"({(total_tok / pf['total'] * 100):.0f}%)" if pf["total"] else "",
-          ""]
+          "| 구분 | 토큰 | 단가(1K) | 추정 비용 |", "|---|---|---|---|",
+          f"| 입력 | {tp:,} | {U.PRICE_PROMPT_PER_1K}원 | {U.fmt_won(wp)} |",
+          f"| 출력 | {tc:,} | {U.PRICE_COMPLETION_PER_1K}원 | {U.fmt_won(wc)} |",
+          f"| **합계** | **{total_tok:,}** | | **{U.fmt_won(wp + wc)}** |", ""]
+    if rows:
+        L.append(f"- LLM 호출 {llm_calls}회 · 문항당 평균 입력 {tp / len(rows):,.0f} + "
+                 f"출력 {tc / len(rows):,.0f} 토큰 "
+                 f"({U.fmt_won(U.won(tp / len(rows), tc / len(rows)))}/문항)")
+    if budget.limit_won:
+        L.append(f"- 상한 {U.fmt_won(budget.limit_won)} · 남은 예산 "
+                 f"{U.fmt_won(budget.remaining_won())}")
+    if pf["total"]:
+        L.append(f"- 실행 전 예상 {U.fmt_won(pf['won'])} → 실제 "
+                 f"{U.fmt_won(wp + wc)} ({(wp + wc) / pf['won'] * 100:.0f}%)")
+    L.append("")
     if unknown:
-        L += [f"- ⚠ 토큰을 알 수 없는 호출 {unknown}건(응답에 usage 없음). "
-              f"0 으로 세지 않았으므로 위 합계는 **하한**이다", ""]
-    L += [f"환산 기준 {U.TOKENS_PER_UNIT:,} 토큰 = {U.fmt_won(U.WON_PER_UNIT)}. "
-          f"**확인된 요금표가 아니라 사람이 정한 기준이다.**", ""]
+        L += [f"- ⚠ 입력·출력 내역을 알 수 없는 호출 {unknown}건. 0 으로 세지 않았으므로 "
+              f"위 합계는 **하한**이다", ""]
+    L += [U.price_line(), ""]
 
     # 토큰 상위 5
-    L += ["## 토큰을 많이 쓴 문항 상위 5", "",
-          "| 문항 | 유형 | 토큰 | 추정 | 도구 | LLM |", "|---|---|---|---|---|---|"]
-    for r in sorted(rows, key=lambda x: -x["usage"].get("total", 0))[:5]:
-        t = r["usage"].get("total", 0)
-        L.append(f"| {r['qid']} | {r['qtype']} | {t:,} | "
-                 f"{U.fmt_won(U.won(t))} | {r['n_tool_calls']} | "
-                 f"{r['usage'].get('llm_calls', 0)} |")
+    def cost_of(r):
+        return U.won(r["usage"].get("prompt", 0), r["usage"].get("completion", 0)) or 0.0
+
+    L += ["## 비용이 큰 문항 상위 5", "",
+          "| 문항 | 유형 | 입력 | 출력 | 추정 비용 | 도구 | LLM |",
+          "|---|---|---|---|---|---|---|"]
+    for r in sorted(rows, key=lambda x: -cost_of(x))[:5]:
+        u = r["usage"]
+        L.append(f"| {r['qid']} | {r['qtype']} | {u.get('prompt', 0):,} | "
+                 f"{u.get('completion', 0):,} | {U.fmt_won(cost_of(r))} | "
+                 f"{r['n_tool_calls']} | {u.get('llm_calls', 0)} |")
     L.append("")
 
     # 낭비 신호
@@ -336,12 +371,14 @@ def report(rows: list, budget, run_name: str, pf: dict) -> str:
     for r in rows:
         by[r["qtype"]].append(r)
     L += ["## 유형별", "",
-          "| 유형 | 문항 | 평균 토큰 | 평균 도구 | 평균 초 | 근거 0건 |",
-          "|---|---|---|---|---|---|"]
+          "| 유형 | 문항 | 평균 입력 | 평균 출력 | 평균 비용 | 평균 도구 | 평균 초 | 근거 0건 |",
+          "|---|---|---|---|---|---|---|---|"]
     for k in sorted(by):
         g = by[k]
-        L.append(f"| {k} | {len(g)} | "
-                 f"{sum(x['usage'].get('total', 0) for x in g) / len(g):,.0f} | "
+        ap = sum(x["usage"].get("prompt", 0) for x in g) / len(g)
+        ac = sum(x["usage"].get("completion", 0) for x in g) / len(g)
+        L.append(f"| {k} | {len(g)} | {ap:,.0f} | {ac:,.0f} | "
+                 f"{U.fmt_won(U.won(ap, ac))} | "
                  f"{sum(x['n_tool_calls'] for x in g) / len(g):.1f} | "
                  f"{sum(x['elapsed'] for x in g) / len(g):.0f} | "
                  f"{sum(1 for x in g if not x['sources'])} |")
@@ -414,7 +451,7 @@ def main() -> int:
         print("[끝] 돌 문항이 없다")
         return 0
 
-    pf = preflight(len(picked), a.max_cost, U.avg_tokens_per_item(script=SCRIPT))
+    pf = preflight(len(picked), a.max_cost, U.avg_split_per_item(script=SCRIPT))
     print_preflight(pf)
 
     if not a.yes:

@@ -3,7 +3,7 @@
   python eval/test_usage.py
 
 가짜 `clova.chat` 으로 루프를 돌려 아래를 확인한다.
-  1. 환산·예산 계산이 맞는가
+  1. 입력·출력 단가(1.25 / 5.00 per 1K)와 예산 계산이 맞는가
   2. usage 가 없는 응답을 0 으로 채우지 않는가 (안 썼다 ≠ 모른다)
   3. 예산을 넘으면 **문항 중간에도** 멈추는가
   4. 낭비 신호(재호출 차단 / error 뒤 재시도 / 6회 한도 / 429)를 세는가
@@ -61,26 +61,40 @@ USAGE = {"promptTokens": 4000, "completionTokens": 1000, "totalTokens": 5000}
 def main() -> int:
     real_chat = clova.chat
 
-    # ---------- 1. 환산·예산
-    print(f"{BAR}\n1 — 환산과 예산 계산\n{BAR}")
-    check("200만 토큰 = 4,800원", abs(U.won(2_000_000) - 4800.0) < 1e-6,
-          U.fmt_won(U.won(2_000_000)))
-    check("5만 토큰 × 40문항 = 4,800원", abs(U.won(50_000 * 40) - 4800.0) < 1e-6)
+    # ---------- 1. 단가·예산
+    print(f"{BAR}\n1 — 단가(입력 1.25 / 출력 5.00 per 1K)와 예산\n{BAR}")
+    check("입력 1,000토큰 = 1.25원", abs(U.won(1000, 0) - 1.25) < 1e-9,
+          f"{U.won(1000, 0)}원")
+    check("출력 1,000토큰 = 5.00원", abs(U.won(0, 1000) - 5.0) < 1e-9,
+          f"{U.won(0, 1000)}원")
+    check("출력이 입력의 4배", abs(U.won(0, 1000) / U.won(1000, 0) - 4.0) < 1e-9)
+    check("총 토큰만으로는 값을 내지 않는다", U.won(50_000, None) is None
+          and U.won(None, None) is None)
+    per_item = U.won(U.DEFAULT_PROMPT_PER_ITEM, U.DEFAULT_COMPLETION_PER_ITEM)
+    check("기본 가정 문항 1건 = 81.25원", abs(per_item - 81.25) < 1e-9,
+          f"입력 45,000 + 출력 5,000 → {per_item}원")
+    check("40문항 = 3,250원", abs(per_item * 40 - 3250.0) < 1e-6,
+          U.fmt_won(per_item * 40))
+
     b = U.Budget(limit_won=5000)
-    b.add(1_000_000)
+    b.add(1_000_000, 0)                       # 1,250원
     check("상한 미만이면 exceeded=False", not b.exceeded(), b.line())
-    b.add(1_200_000)
+    b.add(2_000_000, 250_000)                 # +2,500 +1,250 = 5,000원
     check("상한 넘으면 exceeded=True", b.exceeded(), b.line())
+    b.add(1000, 0)
     check("remaining 이 음수로 정확히 나온다", b.remaining_won() < 0,
-          f"{b.remaining_won():.0f}원")
+          f"{b.remaining_won():.2f}원")
 
     # ---------- 2. usage 결측을 0 으로 채우지 않는다
     print(f"\n{BAR}\n2 — usage 가 없는 호출\n{BAR}")
     p = U.parse_usage(None)
     check("total=None", p["total"] is None, str(p))
     check("missing=True", p["missing"])
+    check("내역이 반쪽이면 missing=True",
+          U.parse_usage({"totalTokens": 5000})["missing"] is True,
+          "총 토큰만 알면 금액을 못 낸다(단가가 4배 다르다)")
     b2 = U.Budget(limit_won=100)
-    b2.add(None)
+    b2.add(None, None)
     check("예산에 0 이 더해지지 않는다", b2.tokens == 0 and b2.unknown_calls == 1,
           b2.line())
     p2 = U.parse_usage({"promptTokens": 7, "completionTokens": 3})
@@ -104,12 +118,13 @@ def main() -> int:
                 "completion_tokens", "total", "est_won"}
         check("요구된 키가 모두 있다", keys <= set(rows[0]),
               str(sorted(keys - set(rows[0]))))
-        check("est_won 이 토큰과 맞는다", abs(r1["est_won"] - 12.0) < 1e-6,
-              f"{r1['est_won']}원 (5,000토큰)")
+        check("est_won 이 단가와 맞는다", abs(r1["est_won"] - 10.0) < 1e-6,
+              f"{r1['est_won']}원 (입력 4,000×1.25/1K + 출력 1,000×5/1K)")
         check("usage 없는 줄은 total=null", rows[1]["total"] is None)
         check("429 재시도가 기록된다", rows[1]["retry_429"] == 2)
-        check("문항 평균은 아는 것만 센다", U.avg_tokens_per_item() == 5000.0,
-              str(U.avg_tokens_per_item()))
+        avg = U.avg_split_per_item()
+        check("문항 평균은 아는 것만 센다",
+              avg == {"prompt": 4000.0, "completion": 1000.0, "n": 1}, str(avg))
     U.LOG_PATH = real_log
     U.set_enabled(False)          # 아래 루프 테스트는 진짜 로그를 건드리지 않는다
 
@@ -123,7 +138,7 @@ def main() -> int:
                      args={"query": f"검색어{n_chat['n']}"})
 
     clova.chat = chat_forever_tools
-    U.use_budget(U.Budget(limit_won=12.0))       # 5,000토큰 = 12원 → 1회면 도달
+    U.use_budget(U.Budget(limit_won=12.0))       # 호출당 10원 → 2회째 진입에서 도달
     res = loop.answer("질문", max_tool_calls=6, deadline=60)
     clova.chat = real_chat
     check("stopped_by_budget=True", res["stopped_by_budget"] is True)
@@ -152,8 +167,9 @@ def main() -> int:
     check("토큰이 문항 단위로 합산된다",
           res["usage"]["total"] == 5000 * res["usage"]["llm_calls"],
           f"{res['usage']['total']:,} / {res['usage']['llm_calls']}회")
-    check("추정 비용이 붙는다", res["usage"]["est_won"] > 0,
-          U.fmt_won(res["usage"]["est_won"]))
+    check("추정 비용이 입력·출력을 나눠 계산된다",
+          abs(res["usage"]["est_won"] - 10.0 * res["usage"]["llm_calls"]) < 0.01,
+          f"{res['usage']['est_won']}원 / {res['usage']['llm_calls']}회 × 10원")
 
     n3 = {"n": 0}
 
@@ -234,12 +250,15 @@ def main() -> int:
           [x["qid"] for x in E.sample(items, 12)] == [x["qid"] for x in picked])
 
     pf = E.preflight(40, 5000.0, None)
-    check("예상치: 40문항 × 5만 = 200만 토큰", pf["total"] == 2_000_000, str(pf["total"]))
-    check("예상 비용 4,800원", abs(pf["won"] - 4800.0) < 1e-6, U.fmt_won(pf["won"]))
+    check("예상치: 40문항 × (입력 45,000 + 출력 5,000)", pf["total"] == 2_000_000,
+          f"입력 {pf['total_prompt']:,} + 출력 {pf['total_completion']:,}")
+    check("예상 비용 3,250원", abs(pf["won"] - 3250.0) < 1e-6, U.fmt_won(pf["won"]))
     check("실측이 없으면 measured=False", pf["measured"] is False)
-    pf2 = E.preflight(10, 5000.0, 30_000.0)
+    pf2 = E.preflight(10, 5000.0, {"prompt": 28_000.0, "completion": 2_000.0, "n": 5})
     check("실측 평균이 있으면 그것을 쓴다",
-          pf2["total"] == 300_000 and pf2["measured"] is True, str(pf2["total"]))
+          pf2["total"] == 300_000 and pf2["measured"] is True
+          and abs(pf2["won"] - 450.0) < 1e-6,
+          f"{pf2['total']:,}토큰 · {U.fmt_won(pf2['won'])}")
 
     nh = E.numbers_hit("매출액은 148,181,177천원이다", "148,181,177천원 (약 1,481억)")
     check("숫자 힌트가 센다", nh["hit"] >= 1, str(nh))

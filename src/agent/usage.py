@@ -6,16 +6,18 @@
   ...
   usage.record(model="HCX-005", usage_dict=res.get("usage"))
 
-【단가 — 확인된 값이 아니라 사람이 정한 환산 기준이다】
-2,000,000 토큰 = 4,800원 으로 환산한다(사용자 지정, 2026-09-02).
-HyperCLOVA X 문서·상품 페이지 어디에도 단가가 없어 실제 요금표는 확인하지 못했다.
-프롬프트/완성 토큰 단가를 나누지 않고 **총 토큰**에 한 단가를 적용한다.
-바꾸려면 아래 상수 둘만 고치면 된다. 리포트에는 언제나 '추정' 이라고 적는다.
+【단가 — HCX-005 (사용자 확인, 2026-09-02)】
+  입력(프롬프트)  1,000토큰당 1.25원   = 0.00125 원/토큰
+  출력(완성)      1,000토큰당 5.00원   = 0.005   원/토큰
 
-【usage 가 없는 호출은 0 으로 채우지 않는다】
-응답에 usage 가 없으면 토큰을 `null` 로 기록하고 `usage_missing=true` 를 남긴다.
-0 으로 채우면 "안 썼다" 와 "모른다" 가 구분되지 않고, 예산이 조용히 새어 나간다.
-집계에서는 별도 항목으로 센다(CLAUDE.md 규칙 1·9).
+**출력이 입력보다 4배 비싸다.** 그래서 총 토큰 하나로 환산하면 안 된다.
+프롬프트와 완성을 반드시 나눠서 곱한다. 다른 모델을 쓰게 되면 아래 상수 둘만 고친다.
+
+【둘 중 하나라도 모르면 값을 내지 않는다】
+`won()` 은 프롬프트·완성이 **둘 다** 있어야 금액을 돌려준다. 하나만 알거나
+`usage` 가 아예 없으면 `None` 이다. 4배 차이 나는 단가를 두고 비율을 가정하면
+그 추정은 최대 4배 틀린다. 모르는 것은 모른다고 세고(`unknown_calls`),
+합계 옆에 "이 값은 하한이다" 를 붙인다(CLAUDE.md 규칙 1·9).
 
 【로그 파일】
 `eval/token_log.jsonl` 에 한 줄씩 append 한다. 읽는 쪽은 `eval/token_log.py`.
@@ -23,7 +25,6 @@ HyperCLOVA X 문서·상품 페이지 어디에도 단가가 없어 실제 요�
 from __future__ import annotations
 
 import json
-import os
 import sys
 import threading
 import time
@@ -32,13 +33,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 LOG_PATH = ROOT / "eval" / "token_log.jsonl"
 
-# 환산 기준 (사용자 지정)
-TOKENS_PER_UNIT = 2_000_000
-WON_PER_UNIT = 4_800.0
-WON_PER_TOKEN = WON_PER_UNIT / TOKENS_PER_UNIT          # 0.0024 원/토큰
+# HCX-005 단가 (1,000토큰당 원)
+PRICE_PROMPT_PER_1K = 1.25
+PRICE_COMPLETION_PER_1K = 5.00
+WON_PER_PROMPT_TOKEN = PRICE_PROMPT_PER_1K / 1000.0        # 0.00125
+WON_PER_COMPLETION_TOKEN = PRICE_COMPLETION_PER_1K / 1000.0  # 0.005
 
-# 예상치를 낼 때 쓸 기본값. 실측 로그가 있으면 그쪽을 먼저 쓴다.
-DEFAULT_TOKENS_PER_ITEM = 50_000
+# 실행 전 예상치에 쓸 기본값. **실측이 아니라 가정이다** — 한 번이라도 돌리면
+# token_log.jsonl 의 실측 평균으로 대체된다. 프롬프트가 압도적으로 크다:
+# 시스템 프롬프트 4,000자에 도구 결과가 턴마다 12,000자씩 쌓이고,
+# 완성은 loop.MAX_TOKENS=2048 로 묶여 있다.
+DEFAULT_PROMPT_PER_ITEM = 45_000
+DEFAULT_COMPLETION_PER_ITEM = 5_000
 
 _LOCK = threading.Lock()
 _CTX = {"script": None, "qid": None}
@@ -46,16 +52,29 @@ _BUDGET = None
 _ENABLED = True
 
 
-def won(tokens) -> float:
-    """토큰 수 → 추정 원. 토큰을 모르면 0 을 돌려주되 부르는 쪽이 그걸 알아야 한다."""
+def won(prompt=None, completion=None):
+    """(프롬프트, 완성) → 추정 원. 하나라도 모르면 None.
+
+    총 토큰만으로는 계산하지 않는다. 출력 단가가 입력의 4배라 비율을 가정하면
+    그 값이 최대 4배 틀린다.
+    """
+    if prompt is None or completion is None:
+        return None
     try:
-        return float(tokens or 0) * WON_PER_TOKEN
+        return (float(prompt) * WON_PER_PROMPT_TOKEN
+                + float(completion) * WON_PER_COMPLETION_TOKEN)
     except (TypeError, ValueError):
-        return 0.0
+        return None
 
 
 def fmt_won(v) -> str:
-    return f"{v:,.0f}원"
+    return "?원" if v is None else f"{v:,.0f}원"
+
+
+def price_line() -> str:
+    """리포트마다 붙이는 단가 한 줄."""
+    return (f"HCX-005 단가: 입력 1,000토큰 {PRICE_PROMPT_PER_1K}원 · "
+            f"출력 1,000토큰 {PRICE_COMPLETION_PER_1K}원 (출력이 4배 비싸다)")
 
 
 # ---------------------------------------------------------------- 실행 맥락
@@ -97,20 +116,26 @@ class Budget:
 
     def __init__(self, limit_won=None) -> None:
         self.limit_won = None if limit_won is None else float(limit_won)
-        self.tokens = 0
+        self.prompt = 0
+        self.completion = 0
         self.calls = 0
-        self.unknown_calls = 0          # usage 가 없던 호출
+        self.unknown_calls = 0          # 프롬프트·완성을 모르던 호출
+
+    @property
+    def tokens(self) -> int:
+        return self.prompt + self.completion
 
     @property
     def spent_won(self) -> float:
-        return won(self.tokens)
+        return won(self.prompt, self.completion) or 0.0
 
-    def add(self, tokens) -> None:
+    def add(self, prompt=None, completion=None) -> None:
         self.calls += 1
-        if tokens is None:
+        if prompt is None or completion is None:
             self.unknown_calls += 1
             return
-        self.tokens += int(tokens)
+        self.prompt += int(prompt)
+        self.completion += int(completion)
 
     def exceeded(self) -> bool:
         return self.limit_won is not None and self.spent_won >= self.limit_won
@@ -119,7 +144,8 @@ class Budget:
         return None if self.limit_won is None else self.limit_won - self.spent_won
 
     def line(self) -> str:
-        s = f"{self.tokens:,} 토큰 · {fmt_won(self.spent_won)} 추정 · {self.calls}회 호출"
+        s = (f"입력 {self.prompt:,} + 출력 {self.completion:,} = {self.tokens:,} 토큰 · "
+             f"{fmt_won(self.spent_won)} 추정 · {self.calls}회 호출")
         if self.limit_won is not None:
             s += f" · 상한 {fmt_won(self.limit_won)}"
         if self.unknown_calls:
@@ -153,7 +179,7 @@ def parse_usage(u) -> dict:
     """HCX result.usage → {prompt, completion, total, missing}.
 
     total 이 없으면 prompt+completion 으로 채운다(둘 다 있을 때만).
-    셋 다 없으면 missing=True 다.
+    **반대는 하지 않는다** — total 만 있고 내역을 모르면 금액을 낼 수 없다.
     """
     u = u or {}
     p = _num(u.get("promptTokens"))
@@ -162,13 +188,14 @@ def parse_usage(u) -> dict:
     if t is None and p is not None and c is not None:
         t = p + c
     return {"prompt": p, "completion": c, "total": t,
-            "missing": t is None}
+            "missing": p is None or c is None}
 
 
 def record(model=None, usage_dict=None, script=None, qid=None, ok=True,
            retries=0, retry_429=0, retry_wait_s=0.0, elapsed=None, note="") -> dict:
     """호출 1건을 예산에 더하고 eval/token_log.jsonl 에 한 줄 남긴다."""
     u = parse_usage(usage_dict)
+    est = won(u["prompt"], u["completion"])
     row = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "script": script or _CTX.get("script") or "?",
@@ -177,7 +204,7 @@ def record(model=None, usage_dict=None, script=None, qid=None, ok=True,
         "prompt_tokens": u["prompt"],
         "completion_tokens": u["completion"],
         "total": u["total"],
-        "est_won": round(won(u["total"]), 3) if u["total"] is not None else None,
+        "est_won": None if est is None else round(est, 3),
         "ok": bool(ok),
         "retries": int(retries or 0),
         "retry_429": int(retry_429 or 0),
@@ -190,7 +217,7 @@ def record(model=None, usage_dict=None, script=None, qid=None, ok=True,
         row["note"] = note
 
     if _BUDGET is not None:
-        _BUDGET.add(u["total"])
+        _BUDGET.add(u["prompt"], u["completion"])
 
     append(row)
     return row
@@ -233,20 +260,25 @@ def read_log(path=None) -> list:
     return rows
 
 
-def avg_tokens_per_item(script=None, path=None):
-    """실측 평균 토큰/문항. 근거가 없으면 None — 기본값을 지어내지 않는다.
+def avg_split_per_item(script=None, path=None):
+    """문항 1건당 실측 평균 {prompt, completion, n}. 근거가 없으면 None.
 
     같은 qid 의 여러 호출을 한 문항으로 묶는다(한 문항이 도구 왕복으로 3~6회 부른다).
-    qid 가 없는 줄은 문항 단위를 알 수 없으므로 뺀다.
+    qid 가 없거나 내역을 모르는 줄은 뺀다 — 기본값을 지어내지 않는다.
     """
     per: dict = {}
     for r in read_log(path):
         if script and r.get("script") != script:
             continue
-        qid, tot = r.get("qid"), r.get("total")
-        if not qid or tot is None:
+        qid = r.get("qid")
+        p, c = r.get("prompt_tokens"), r.get("completion_tokens")
+        if not qid or p is None or c is None:
             continue
-        per[qid] = per.get(qid, 0) + int(tot)
+        a = per.setdefault(qid, [0, 0])
+        a[0] += int(p)
+        a[1] += int(c)
     if not per:
         return None
-    return sum(per.values()) / len(per)
+    n = len(per)
+    return {"prompt": sum(v[0] for v in per.values()) / n,
+            "completion": sum(v[1] for v in per.values()) / n, "n": n}

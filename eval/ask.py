@@ -85,10 +85,12 @@ def main() -> int:
 
     u, w = res.get("usage") or {}, res.get("waste") or {}
     print(f"\n{BAR}\n토큰·비용 (추정)\n{BAR}")
-    print(f"{u.get('total', 0):,} 토큰 "
-          f"(프롬프트 {u.get('prompt', 0):,} + 완성 {u.get('completion', 0):,}) "
-          f"· {U.fmt_won(U.won(u.get('total', 0)))} 추정 "
-          f"· LLM {u.get('llm_calls', 0)}회")
+    pt, ct = u.get("prompt", 0), u.get("completion", 0)
+    print(f"입력 {pt:,} + 출력 {ct:,} = {pt + ct:,} 토큰 · LLM {u.get('llm_calls', 0)}회")
+    print(f"입력 {U.fmt_won(pt * U.WON_PER_PROMPT_TOKEN)} + "
+          f"출력 {U.fmt_won(ct * U.WON_PER_COMPLETION_TOKEN)} = "
+          f"**{U.fmt_won(U.won(pt, ct))}** 추정")
+    print(U.price_line())
     if u.get("unknown_calls"):
         print(f"토큰을 알 수 없는 호출 {u['unknown_calls']}건 — 위 수치는 하한이다")
     waste = [f"재호출 차단 {w.get('repeat_blocked', 0)}",

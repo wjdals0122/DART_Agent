@@ -7,9 +7,10 @@
 로그는 `src/agent/usage.py` 가 `eval/token_log.jsonl` 에 한 줄씩 append 한다.
 `ask.py` · `quick_qa.py` · `run_e2e.py` 가 모두 같은 파일에 쓴다.
 
-【비용은 추정이다】
-2,000,000 토큰 = 4,800원 환산(사용자 지정). 실제 요금표는 확인하지 못했다.
-숫자 옆에 언제나 '추정' 을 붙인다.
+【입력과 출력을 나눠서 센다】
+HCX-005 는 입력 1,000토큰 1.25원, 출력 1,000토큰 5원이다. **출력이 4배 비싸다.**
+총 토큰만으로는 금액을 낼 수 없으므로 내역을 모르는 호출은 '토큰미상' 으로 따로 센다.
+그런 호출이 있으면 합계는 하한이다.
 """
 from __future__ import annotations
 
@@ -35,7 +36,6 @@ class Acc:
     """한 덩어리의 합계. 토큰을 모르는 호출은 0 으로 세지 않고 따로 센다."""
 
     def __init__(self) -> None:
-        self.tokens = 0
         self.prompt = 0
         self.completion = 0
         self.calls = 0
@@ -47,13 +47,13 @@ class Acc:
 
     def add(self, r: dict) -> None:
         self.calls += 1
-        t = r.get("total")
-        if t is None:
+        p, c = r.get("prompt_tokens"), r.get("completion_tokens")
+        if p is None or c is None:
+            # 입력·출력 단가가 4배 다르다. 내역을 모르면 금액을 낼 수 없다
             self.unknown += 1
         else:
-            self.tokens += int(t)
-            self.prompt += int(r.get("prompt_tokens") or 0)
-            self.completion += int(r.get("completion_tokens") or 0)
+            self.prompt += int(p)
+            self.completion += int(c)
         if not r.get("ok", True):
             self.failed += 1
         self.retry += int(r.get("retries") or 0)
@@ -61,17 +61,22 @@ class Acc:
         self.wait_s += float(r.get("retry_wait_s") or 0.0)
 
     @property
+    def tokens(self) -> int:
+        return self.prompt + self.completion
+
+    @property
     def won(self) -> float:
-        return U.won(self.tokens)
+        return U.won(self.prompt, self.completion) or 0.0
 
     def cells(self) -> list:
-        return [f"{self.calls:,}", f"{self.tokens:,}", U.fmt_won(self.won),
+        return [f"{self.calls:,}", f"{self.prompt:,}", f"{self.completion:,}",
+                U.fmt_won(self.won),
                 f"{self.unknown}" if self.unknown else "-",
                 f"{self.failed}" if self.failed else "-",
                 f"{self.retry_429}" if self.retry_429 else "-"]
 
 
-HEAD = ["호출", "토큰", "추정 비용", "토큰미상", "실패", "429"]
+HEAD = ["호출", "입력", "출력", "추정 비용", "토큰미상", "실패", "429"]
 
 
 def table(rows: list) -> str:
@@ -116,8 +121,7 @@ def summarize(rows: list, days=None, path=None) -> int:
 
     span = f"최근 {days}일" if days else "누적 전체"
     print(f"{BAR}\n토큰·비용 요약 ({span}) · {src.name}\n{BAR}")
-    print(f"환산 기준: {U.TOKENS_PER_UNIT:,} 토큰 = {U.fmt_won(U.WON_PER_UNIT)} "
-          f"({U.WON_PER_TOKEN}원/토큰). **확인된 요금표가 아니라 사람이 정한 기준이다**\n")
+    print(U.price_line() + "\n")
 
     print(table([["구분"] + HEAD,
                  [f"오늘({today})"] + day_acc.cells(),
@@ -149,30 +153,35 @@ def summarize(rows: list, days=None, path=None) -> int:
         print(f"\n토큰을 알 수 없는 호출 {total.unknown}건. 응답에 usage 가 없었다. "
               f"0 으로 세지 않았으므로 위 합계는 **하한**이다")
 
-    avg = U.avg_tokens_per_item(path=path)
+    avg = U.avg_split_per_item(path=path)
     if avg:
-        print(f"\n문항 1건당 실측 평균 {avg:,.0f} 토큰 "
-              f"({U.fmt_won(U.won(avg))} 추정) — qid 가 붙은 호출만 묶은 값")
+        print(f"\n문항 1건당 실측 평균 입력 {avg['prompt']:,.0f} + "
+              f"출력 {avg['completion']:,.0f} 토큰 = "
+              f"{U.fmt_won(U.won(avg['prompt'], avg['completion']))} 추정 "
+              f"(문항 {avg['n']}건 기준)")
     return 0
 
 
 def top_items(rows: list, n: int) -> int:
     """qid 별 토큰 합계 상위 n."""
-    per: dict = defaultdict(lambda: [0, 0])       # qid -> [토큰, 호출수]
+    per: dict = defaultdict(lambda: [0, 0, 0])    # qid -> [입력, 출력, 호출수]
     for r in rows:
-        qid, t = r.get("qid"), r.get("total")
+        qid = r.get("qid")
         if not qid:
             continue
-        per[qid][1] += 1
-        if t is not None:
-            per[qid][0] += int(t)
+        per[qid][2] += 1
+        p, c = r.get("prompt_tokens"), r.get("completion_tokens")
+        if p is not None and c is not None:
+            per[qid][0] += int(p)
+            per[qid][1] += int(c)
     if not per:
         print("qid 가 붙은 호출이 없다. 문항 단위 집계를 할 수 없다.")
         return 0
     print(f"{BAR}\n문항별 토큰 상위 {n}\n{BAR}")
-    rows_o = [["문항", "토큰", "추정 비용", "LLM 호출"]]
-    for qid, (tok, calls) in sorted(per.items(), key=lambda kv: -kv[1][0])[:n]:
-        rows_o.append([qid, f"{tok:,}", U.fmt_won(U.won(tok)), str(calls)])
+    rows_o = [["문항", "입력", "출력", "추정 비용", "LLM 호출"]]
+    for qid, (p, c, calls) in sorted(per.items(),
+                                     key=lambda kv: -(U.won(kv[1][0], kv[1][1]) or 0))[:n]:
+        rows_o.append([qid, f"{p:,}", f"{c:,}", U.fmt_won(U.won(p, c)), str(calls)])
     print(table(rows_o))
     return 0
 
