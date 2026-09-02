@@ -1,0 +1,17 @@
+{
+  "n_periodic_receipts": 1054,
+  "n_receipts_with_current_ki": 1049,
+  "n_receipts_without_fin_section": 5,
+  "n_doc_ids": 1462,
+  "receipts_without_fin_section": [
+    "20230515002692",
+    "20230814002969",
+    "20240320002039",
+    "20240514001522",
+    "20260619000667"
+  ],
+  "skipped": {
+    "이벤트 공시": 37569
+  },
+  "seconds": 16.8
+}
