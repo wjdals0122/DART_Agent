@@ -64,20 +64,34 @@ def safe_tool(fn):
 # ---------------------------------------------------------------- 검색 · 회사 해석
 
 
+# query 가 비어 왔을 때 돌려줄 안내.
+#
+# 【기본 질의어를 지어내지 않는 이유】
+# corp_name 만으로 '삼성전자' 같은 질의어를 만들면 검색은 되지만 무엇을 찾는지는
+# 아무도 모른다. 그 결과로 답이 나가면 조용한 오염이다(CLAUDE.md 규칙 1).
+# 대신 모델이 다시 부를 수 있게 무엇이 빠졌는지와 예시를 준다. 실측으로
+# "query 가 비어 있다" 만 돌려줬을 때 모델은 재시도 없이 답변을 포기했다.
+EMPTY_QUERY_NOTE = (
+    "query 인자가 비어 있다. 무엇을 찾을지 검색어를 넣어 다시 호출하라. "
+    "예: '연결 손익계산서 매출액', '사업의 개요 주요 제품'"
+)
+
+
 def _search_disclosure(query=None, corp_name=None, fiscal_year=None, rcept_no=None,
-                       rcept_dt=None, doc_group=None, top_k=5,
+                       rcept_dt=None, doc_group=None, report_type=None, top_k=5,
                        include_superseded=False) -> dict:
     """기존 Retriever 를 그대로 부른다. 인덱스가 무거우므로 여기서 늦게 임포트한다."""
     from src.search.hybrid import get_searcher
 
     if query is None or not str(query).strip():
-        return {"status": "error", "note": "query 가 비어 있다"}
+        return {"status": "error", "note": EMPTY_QUERY_NOTE}
     try:
         k = max(1, min(int(top_k), MAX_TOP_K))
     except (TypeError, ValueError):
         k = 5
     res = get_searcher().search(str(query), corp_name=corp_name, fiscal_year=fiscal_year,
                                 rcept_no=rcept_no, rcept_dt=rcept_dt, doc_group=doc_group,
+                                report_type=report_type,
                                 top_k=k, include_superseded=bool(include_superseded))
     res.pop("pool", None)                      # LLM 에게 줄 것이 아니다
     res["sources"] = _sources(res.get("results") or [])

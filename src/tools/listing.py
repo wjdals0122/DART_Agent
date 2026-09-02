@@ -9,6 +9,11 @@ manifest 에 이미 다 있는 정보라 그냥 세면 된다.
 `by_subtype` 의 건수·비중을 여기서 계산해 돌려준다. LLM 에게 목록을 주고 세게 하면
 반드시 틀린다. `limit` 으로 잘리는 건 `results` 뿐이고 `total`·`by_subtype` 은 전량 기준이다.
 
+【정렬은 최신순이다 — 바꾸지 말 것】
+`results` 는 접수일 **내림차순**이다. 이 도구를 부르는 가장 흔한 이유가
+"가장 최신 보고서가 무엇인가" 라서, limit 에 잘리는 쪽은 반드시 오래된 것이어야 한다.
+`series_of` 결과만 자른 뒤에 오름차순으로 되돌린다(정정 이력은 시간순이 읽기 좋다).
+
 【사업연도 주의】
 manifest 의 `base_year` 는 **접수 연도**다. 2024 사업연도 사업보고서는 2025년에 접수되므로
 base_year=2025 다. 사업연도로 거르려면 report_nm 의 '(2024.12)' 를 봐야 한다.
@@ -128,8 +133,12 @@ def list_disclosures(corp_name=None, doc_group=None, fiscal_year=None,
             sel = [d for d in sel if d.get("is_correction")]
             notes.append("정정공시만")
 
+    # 최신순(내림차순)으로 정렬한다. limit 로 자를 때 **최신이 남아야** 한다.
+    # 오름차순으로 자르면 "최근 보고서" 를 묻는 질문에서 최신 문서가 통째로 사라진다.
+    # 실측: LG이노텍 periodic 17건 · limit=10 → 2025.05 이후 7건이 전부 잘려 나가고,
+    # 모델은 남은 것 중 가장 최신인 2024 사업보고서를 "최근" 으로 골랐다.
     sel = sorted(sel, key=lambda d: (str(d.get("rcept_dt") or ""),
-                                     str(d.get("rcept_no") or "")))
+                                     str(d.get("rcept_no") or "")), reverse=True)
     total = len(sel)
     out["total"] = total
     out["by_subtype"] = _ratios(Counter(str(d.get("doc_subtype") or "") for d in sel), total)
@@ -141,9 +150,14 @@ def list_disclosures(corp_name=None, doc_group=None, fiscal_year=None,
     except (TypeError, ValueError):
         lim = 50
         notes.append(f"limit 을 읽을 수 없어 {lim} 으로 둔다")
-    out["results"] = [_row(d, smax) for d in sel[:lim]]
+    rows = [_row(d, smax) for d in sel[:lim]]
+    if series_of:
+        # 정정 이력은 시간순으로 읽는 것이 자연스럽다. **자른 뒤에** 되돌리므로
+        # limit 에 걸려도 최신본이 사라지지 않는다.
+        rows.reverse()
+    out["results"] = rows
     if total > lim:
-        notes.append(f"{total}건 중 앞 {lim}건만 results 에 담았다 "
+        notes.append(f"{total}건 중 최신 {lim}건만 results 에 담았다 "
                      f"(total·by_subtype 은 전량 기준)")
     if total == 0:
         out["status"] = "not_found"

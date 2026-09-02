@@ -34,6 +34,11 @@
               "description": "공시 종류. periodic=사업/반기/분기보고서, major=주요사항보고서, exchange=거래소공시(단일판매계약·투자판단 등), holding=주식등의대량보유상황보고서",
               "enum": ["periodic", "major", "exchange", "holding"]
             },
+            "report_type": {
+              "type": "string",
+              "description": "보고서 종류(사업보고서/반기보고서/분기보고서). 질문이 보고서 종류를 명시했거나 연간 확정치를 묻는 것이 명백할 때만 사용한다. 질문에 접수일이나 접수번호가 있으면 넣지 마라 — 문서가 이미 특정됐고 잘못 넣으면 0건이 된다. 확신이 없으면 넣지 않는 쪽이 안전하다",
+              "enum": ["annual", "half", "quarter"]
+            },
             "top_k": {
               "type": "integer",
               "description": "가져올 조각 수. 기본 5, 최대 10. 표 하나만 필요하면 3~5, 여러 항목을 훑어야 하면 10"

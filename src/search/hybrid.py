@@ -151,6 +151,10 @@ def _caption_lines(prev_text: str, cur_head: str):
     return [], False                                 # 남의 표 — 붙이지 않고 멈춘다
 
 
+def _join_note(*parts) -> str:
+    return " · ".join(p for p in parts if p)
+
+
 def _ymd(v):
     """'2024-03-17' / '20240317' 어느 쪽으로 와도 'YYYYMMDD' 로 통일한다."""
     if v is None:
@@ -163,6 +167,37 @@ def _as_list(v):
     if v is None:
         return None
     return [v] if isinstance(v, (str, int, np.integer)) else list(v)
+
+
+# report_type 은 manifest 의 doc_subtype 을 그대로 쓴다.
+# periodic 의 doc_subtype 은 annual / half / quarter 세 값뿐이다(전량 확인).
+# LLM 이 한국어 이름으로 넣는 일이 잦아 별칭만 받아 준다. 없는 값은 지어내지 않는다.
+REPORT_TYPE_ALIAS = {
+    "annual": "annual", "half": "half", "quarter": "quarter",
+    "사업보고서": "annual", "반기보고서": "half", "분기보고서": "quarter",
+}
+
+
+def _norm_report_type(v):
+    """(doc_subtype 값 리스트, 모르는 값 리스트). 모르는 값은 버리지 않고 알린다.
+
+    모르는 값을 조용히 무시하면 필터가 안 걸린 채 결과가 나가고, 왜 이상한지
+    아무도 모른다(CLAUDE.md 규칙 9). 그래서 그대로 넣어 0건이 되게 하고 note 로 알린다.
+    """
+    if v is None:
+        return None, []
+    want, bad = [], []
+    for x in _as_list(v):
+        t = str(x).strip()
+        if not t:
+            continue
+        k = REPORT_TYPE_ALIAS.get(t)
+        if k is None:
+            bad.append(t)
+            want.append(t)
+        else:
+            want.append(k)
+    return (want or None), bad
 
 
 class Retriever:
@@ -275,7 +310,7 @@ class Retriever:
     def _candidates(self, stock_code=None, base_year=None, fiscal_year=None,
                     doc_group=None, rcept_no=None, rcept_dt=None,
                     rcept_dt_from=None, rcept_dt_to=None,
-                    include_superseded=False) -> np.ndarray:
+                    include_superseded=False, report_type=None) -> np.ndarray:
         m = np.ones(self.n, dtype=bool)
         if not include_superseded:                       # C6
             m &= self.is_latest
@@ -287,6 +322,8 @@ class Retriever:
             m &= np.isin(self.fiscal_year, [int(y) for y in _as_list(fiscal_year)])
         if doc_group:
             m &= np.isin(self.doc_group, _as_list(doc_group))
+        if report_type:                                  # 사업/반기/분기 보고서 구분
+            m &= np.isin(self.doc_subtype, _as_list(report_type))
         if rcept_no:                                     # C3 — 문서 특정
             m &= np.isin(self.receipt_no, [str(v) for v in _as_list(rcept_no)])
         if rcept_dt:                                     # C3 — 접수일 특정
@@ -346,15 +383,17 @@ class Retriever:
     # ---------------------------------------------------------------- 5~6. 조립
 
     def search(self, query: str, corp_name=None, stock_code=None, base_year=None,
-               fiscal_year=None, doc_group=None, rcept_no=None, rcept_dt=None,
+               fiscal_year=None, doc_group=None, report_type=None,
+               rcept_no=None, rcept_dt=None,
                rcept_dt_from=None, rcept_dt_to=None, top_k: int = 5, pool: int = POOL,
                top_m: int = TOP_M, per_doc: int = PER_DOC, w_vec: float = 1.0,
                w_bm25: float = 1.0, include_superseded: bool = False,
                **_ignored) -> dict:
         t0 = time.time()
+        rtype, rtype_bad = _norm_report_type(report_type)
         filters = {"corp_name": corp_name, "stock_code": stock_code,
                    "base_year": base_year, "fiscal_year": fiscal_year,
-                   "doc_group": doc_group, "rcept_no": rcept_no,
+                   "doc_group": doc_group, "report_type": rtype, "rcept_no": rcept_no,
                    "rcept_dt": _ymd(rcept_dt),
                    "rcept_dt_from": _ymd(rcept_dt_from), "rcept_dt_to": _ymd(rcept_dt_to),
                    "include_superseded": include_superseded}
@@ -375,9 +414,15 @@ class Retriever:
 
         cand = self._candidates(stock_code, base_year, fiscal_year, doc_group,
                                 rcept_no, rcept_dt, rcept_dt_from, rcept_dt_to,
-                                include_superseded)
+                                include_superseded, report_type=rtype)
         if cand.size == 0:
-            return {**empty, "status": "not_found", "note": "필터 조건에 맞는 문서가 없다"}
+            note = "필터 조건에 맞는 문서가 없다"
+            if rtype_bad:
+                note += (f" · report_type={rtype_bad} 를 모른다"
+                         " — annual(사업보고서)/half(반기보고서)/quarter(분기보고서) 중 하나여야 한다")
+            elif rtype:
+                note += f" · report_type={rtype} 를 빼고 다시 호출하면 잡힐 수 있다"
+            return {**empty, "status": "not_found", "note": note}
 
         bsc = self.bm25.score(query, rows=cand)
         vsc = self._dense_scores(query, cand)
@@ -442,7 +487,8 @@ class Retriever:
                 "n_preserved_dropped": n_dropped,
                 "elapsed_ms": round((time.time() - t0) * 1000, 1),
                 "results": results, "pool": pool_out,
-                "note": "" if results else "융합 후 남은 결과가 없다"}
+                "note": _join_note("" if results else "융합 후 남은 결과가 없다",
+                                   f"report_type={rtype_bad} 를 모른다" if rtype_bad else "")}
 
     # ---------------------------------------------------------------- [F] 반환 스키마
 
