@@ -601,124 +601,152 @@ def label(dry_run=False) -> int:
     queue = list(pending)
     deferred = []
     written = 0
-    while queue:
-        t = queue.pop(0)
-        query = t["search_query"]
-        card = resolve_company(t["corp"])
-        stock = card.get("stock_code")
-        hits: list = []
-        grep_hits: list = []
-        redraw = True          # **명령이 화면을 다시 그릴지 여기서만 정한다.**
-        # 예전에는 모든 명령이 loop 처음으로 돌아가 재검색 + 전체 재출력을 했다.
-        # 그래서 g 결과가 찍히자마자 질문 60줄에 밀려 화면 밖으로 사라졌고,
-        # 사용자에게는 "g 가 안 먹고 검색 결과만 다시 뜬다" 로 보였다.
-        while True:
-            if redraw:
-                show_question(t, query)
-                t0 = time.time()
-                res = rt.search(query, corp_name=t["corp"], top_k=TOP_K,
-                                pool=max(TOP_K, 50), per_doc=TOP_K)
-                hits = show_hits(res)
-                print(f"(검색 {time.time() - t0:.2f}초)")
-                redraw = False
-                if dry_run:
-                    print("\n--dry-run 이라 여기서 멈춘다. 라벨은 기록하지 않았다.")
-                    return 0
-            print(HELP)
-            try:
-                cmd = input("입력> ").strip()
-            except EOFError:
-                print("\n입력이 끊겼다. 저장하고 종료한다.")
-                return 0
+    try:
+      while queue:
+          t = queue.pop(0)
+          query = t["search_query"]
+          card = resolve_company(t["corp"])
+          stock = card.get("stock_code")
+          hits: list = []
+          grep_hits: list = []
+          redraw = True          # **명령이 화면을 다시 그릴지 여기서만 정한다.**
+          # 예전에는 모든 명령이 loop 처음으로 돌아가 재검색 + 전체 재출력을 했다.
+          # 그래서 g 결과가 찍히자마자 질문 60줄에 밀려 화면 밖으로 사라졌고,
+          # 사용자에게는 "g 가 안 먹고 검색 결과만 다시 뜬다" 로 보였다.
+          while True:
+              if redraw:
+                  show_question(t, query)
+                  t0 = time.time()
+                  res = rt.search(query, corp_name=t["corp"], top_k=TOP_K,
+                                  pool=max(TOP_K, 50), per_doc=TOP_K)
+                  hits = show_hits(res)
+                  print(f"(검색 {time.time() - t0:.2f}초)")
+                  redraw = False
+                  if dry_run:
+                      print("\n--dry-run 이라 여기서 멈춘다. 라벨은 기록하지 않았다.")
+                      raise _Quit
+              print(HELP)
+              cmd = ask("입력> ", allow_quit=False)   # q 는 아래에서 따로 다룬다
 
-            if not cmd or cmd == "?":
-                continue
-            if cmd == "q":
-                print(f"\n저장하고 종료. 이번 세션에 {written}건 기록.")
-                return 0
-            if cmd == "s":
-                deferred.append(t)
-                break
-            if cmd == "r":
-                redraw = True
-                continue
-            if cmd == "a":
-                show_question(t, query)
-                print("(위 검색 결과는 그대로다. 다시 보려면 'r')")
-                continue
-            if cmd == "e":
-                new = input("새 검색어> ").strip()
-                if new:
-                    query = new
-                    redraw = True
-                else:
-                    print("!! 빈 검색어라 그대로 둔다")
-                continue
-            if cmd == "g" or cmd.startswith("g "):
-                arg = cmd[1:].strip()
-                needles = [arg] if arg else _NUMBER.findall(t["ground_truth"] or "")
-                if not stock:
-                    print(f"[grep] 회사명을 못 풀었다: {card.get('status')}")
-                else:
-                    grep_hits = grep_company(rt, stock, needles,
-                                             set(t.get("rcept_nos") or ()))
-                continue                      # 화면을 다시 그리지 않는다
-            if cmd == "n":
-                _write(t, query, [], [], ["not_in_top20"], "")
-                written += 1
-                print("기록: top-20 안에 정답 없음")
-                break
+              if not cmd or cmd == "?":
+                  continue
+              if cmd == "q":
+                  raise _Quit
+              if cmd == "s":
+                  deferred.append(t)
+                  break
+              if cmd == "r":
+                  redraw = True
+                  continue
+              if cmd == "a":
+                  show_question(t, query)
+                  print("(위 검색 결과는 그대로다. 다시 보려면 'r')")
+                  continue
+              if cmd == "e":
+                  new = ask("새 검색어> (q 로 종료)")
+                  if new:
+                      query = new
+                      redraw = True
+                  else:
+                      print("!! 빈 검색어라 그대로 둔다")
+                  continue
+              if cmd == "g" or cmd.startswith("g "):
+                  arg = cmd[1:].strip()
+                  needles = [arg] if arg else _NUMBER.findall(t["ground_truth"] or "")
+                  if not stock:
+                      print(f"[grep] 회사명을 못 풀었다: {card.get('status')}")
+                  else:
+                      grep_hits = grep_company(rt, stock, needles,
+                                               set(t.get("rcept_nos") or ()))
+                  continue                      # 화면을 다시 그리지 않는다
+              if cmd == "n":
+                  _write(t, query, [], [], ["not_in_top20"], "")
+                  written += 1
+                  print("기록: top-20 안에 정답 없음")
+                  break
 
-            # --- 정답 기록 세 가지 경로 ---
-            gold, groups, extra_tags = None, [], []
+              # --- 정답 기록 세 가지 경로 ---
+              gold, groups, extra_tags = None, [], []
 
-            if cmd.startswith("gs"):
-                if not grep_hits:
-                    print("!! g 결과가 없다. 먼저 'g' 로 찾아라")
-                    continue
-                ids = _parse_ids(cmd[2:].strip(), len(grep_hits))
-                if ids is None:
-                    continue
-                gold = [grep_hits[i]["chunk_id"] for i in ids]
-                groups = sorted({grep_hits[i]["doc_group"] for i in ids
-                                 if grep_hits[i]["doc_group"]})
-                extra_tags = ["found_by_grep"]
-            elif re.fullmatch(r"[0-9]+(\s*,\s*[0-9]+)*", cmd):
-                ids = _parse_ids(cmd, len(hits))
-                if ids is None:
-                    continue
-                gold = [hits[i]["chunk_id"] for i in ids]
-                # 공시그룹은 문항이 아니라 **사람이 고른 청크가 실제로 있던 공시**에서 온다
-                groups = sorted({(hits[i].get("source") or {}).get("doc_group")
-                                 for i in ids
-                                 if (hits[i].get("source") or {}).get("doc_group")})
-            elif ":" in cmd:
-                cids = [c.strip() for c in cmd.split(",") if c.strip()]
-                bad = [c for c in cids if lookup(c) is None]
-                if bad:
-                    print(f"!! 코퍼스에 없는 chunk_id: {bad}")
-                    continue
-                gold = cids
-                groups = sorted({lookup(c)[1] for c in cids})
-                # g 결과에서 복사해 붙였을 수 있으니, 거기 있던 id 면 표시를 남긴다
-                if any(c in {h['chunk_id'] for h in grep_hits} for c in cids):
-                    extra_tags = ["found_by_grep"]
-            else:
-                print(f"!! 알 수 없는 입력: {cmd!r} — '?' 로 도움말")
-                continue
+              if cmd.startswith("gs"):
+                  if not grep_hits:
+                      print("!! g 결과가 없다. 먼저 'g' 로 찾아라")
+                      continue
+                  ids = _parse_ids(cmd[2:].strip(), len(grep_hits))
+                  if ids is None:
+                      continue
+                  gold = [grep_hits[i]["chunk_id"] for i in ids]
+                  groups = sorted({grep_hits[i]["doc_group"] for i in ids
+                                   if grep_hits[i]["doc_group"]})
+                  extra_tags = ["found_by_grep"]
+              elif re.fullmatch(r"[0-9]+(\s*,\s*[0-9]+)*", cmd):
+                  ids = _parse_ids(cmd, len(hits))
+                  if ids is None:
+                      continue
+                  gold = [hits[i]["chunk_id"] for i in ids]
+                  # 공시그룹은 문항이 아니라 **사람이 고른 청크가 실제로 있던 공시**에서 온다
+                  groups = sorted({(hits[i].get("source") or {}).get("doc_group")
+                                   for i in ids
+                                   if (hits[i].get("source") or {}).get("doc_group")})
+              elif ":" in cmd:
+                  cids = [c.strip() for c in cmd.split(",") if c.strip()]
+                  bad = [c for c in cids if lookup(c) is None]
+                  if bad:
+                      print(f"!! 코퍼스에 없는 chunk_id: {bad}")
+                      continue
+                  gold = cids
+                  groups = sorted({lookup(c)[1] for c in cids})
+                  # g 결과에서 복사해 붙였을 수 있으니, 거기 있던 id 면 표시를 남긴다
+                  if any(c in {h['chunk_id'] for h in grep_hits} for c in cids):
+                      extra_tags = ["found_by_grep"]
+              else:
+                  print(f"!! 알 수 없는 입력: {cmd!r} — '?' 로 도움말")
+                  continue
 
-            note = input("메모(없으면 엔터)> ").strip()
-            tags = extra_tags + (["edited_query"] if query != t["search_query"] else [])
-            _write(t, query, gold, groups, tags, note)
-            written += 1
-            print(f"기록: {gold} · 공시그룹 {groups}"
-                  + (f" · {tags}" if tags else ""))
-            break
+              # 메모 자리에서 q 를 쳐도 **고른 정답은 기록하고** 나간다.
+              # 사람이 판단을 끝낸 것을 버리면 그 문항을 처음부터 다시 봐야 한다.
+              quitting = False
+              try:
+                  note = ask("메모(없으면 엔터 · q 로 종료)> ")
+              except _Quit:
+                  note, quitting = "", True
+              tags = extra_tags + (["edited_query"] if query != t["search_query"] else [])
+              _write(t, query, gold, groups, tags, note)
+              written += 1
+              print(f"기록: {gold} · 공시그룹 {groups}"
+                    + (f" · {tags}" if tags else ""))
+              if quitting:
+                  raise _Quit
+              break
+
+    except _Quit:
+        pass
 
     if deferred:
         print(f"\n보류 {len(deferred)}문항: " + ", ".join(d["qid"] for d in deferred))
     print(f"이번 세션에 {written}건 기록 → {GOLDEN}")
     return 0
+
+
+class _Quit(Exception):
+    """어느 프롬프트에서든 q / Ctrl+C / EOF 로 빠져나온다."""
+
+
+def ask(prompt: str, allow_quit: bool = True) -> str:
+    """입력을 받는 유일한 자리.
+
+    예전에는 '메모>' 와 '새 검색어>' 가 각자 input() 을 불러서, 거기서 q 를 치면
+    종료가 아니라 메모 내용/검색어가 됐다. Ctrl+C 는 트레이스백만 냈다.
+    프롬프트가 여럿이면 사람은 지금 어디에 있는지 모른다. 전부 여기로 모은다.
+    """
+    try:
+        v = input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\n입력이 끊겼다(EOF/Ctrl+C). 여기까지 기록한 것은 이미 저장돼 있다.")
+        raise _Quit from None
+    if allow_quit and v == "q":
+        raise _Quit
+    return v
 
 
 def _parse_ids(cmd: str, n: int):
