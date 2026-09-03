@@ -53,7 +53,9 @@ PROMPTS = ROOT / "prompts"
 TOOLS_JSON = ROOT / "config" / "tools.json"
 
 MAX_TOOL_CALLS = 6
-DEADLINE = 60.0
+# 주최측 제한이 60초다. 그보다 짧게 잡아야 답을 만들어 보낼 시간이 남는다 —
+# 60초로 두면 답변 생성 도중에 상대가 먼저 끊어 '미응답' 이 된다.
+DEADLINE = 50.0
 MAX_TOKENS = 2048          # 도구 호출은 1024 이상이어야 한다(문서 명시)
 TEMPERATURE = 0.1
 FALLBACK = "공시에서 확인되지 않음"
@@ -336,7 +338,10 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
                      "retry_wait_s": 0.0, "resent_prompt_tokens_est": 0,
                      "no_tool_nudge": False, "list_only_nudge": False,
                      "answered_without_tools": False},
-           "stopped_by_budget": False, "unsourced_claim": False}
+           "stopped_by_budget": False, "unsourced_claim": False,
+           # 검색이 올린 청크 원문. 평가 서버가 retrieved_context 로 그대로 내보낸다.
+           # sources 는 출처 문자열뿐이라 본문이 없다.
+           "documents": []}
     try:
         out = _run(question, out, t0, model, max_tool_calls, deadline, verbose, qid)
     except Exception as e:                     # noqa: BLE001 — 마지막 방어선
@@ -360,6 +365,34 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
         out["note"] = (out.get("note") or "") + f" · 무근거 표시 실패: {e}"
     out["elapsed"] = round(time.time() - t0, 2)
     return out
+
+
+def _keep_documents(out: dict, name: str, tool_out: dict) -> None:
+    """검색이 올린 청크를 원문째 모아 둔다. 같은 청크는 한 번만.
+
+    `sources` 는 `[회사 보고서명 …, 접수번호 …]` 문자열이라 본문이 없다.
+    평가 서버가 "답변 생성에 참고한 검색 문서" 를 내보내려면 본문이 필요하다.
+    """
+    if name != "search_disclosure":
+        return
+    seen = {d["chunk_id"] for d in out["documents"]}
+    for h in (tool_out.get("results") or []):
+        cid = str(h.get("chunk_id") or "")
+        if not cid or cid in seen:
+            continue
+        seen.add(cid)
+        src = h.get("source") or {}
+        out["documents"].append({
+            "chunk_id": cid,
+            "corp_name": str(src.get("corp_name") or ""),
+            "report_nm": str(src.get("report_nm") or ""),
+            "rcept_no": str(src.get("rcept_no") or ""),
+            "rcept_dt": str(src.get("rcept_dt") or ""),
+            "section": str(src.get("section") or ""),
+            "note": str(src.get("note") or ""),
+            # 인접 청크 보강본이 있으면 그쪽이 LLM 이 실제로 본 내용이다
+            "text": str(h.get("augmented") or h.get("text") or ""),
+        })
 
 
 def _account(out: dict, res: dict, model: str, qid) -> None:
@@ -525,6 +558,7 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
             for s in (tool_out.get("sources") or []):
                 if s not in out["sources"]:
                     out["sources"].append(s)
+            _keep_documents(out, name, tool_out)
             out["tool_calls"].append({
                 "n": n_calls, "name": name, "arguments": args,
                 "status": tool_out.get("status"),

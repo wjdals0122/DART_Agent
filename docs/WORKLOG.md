@@ -3016,3 +3016,72 @@ FORCE_CPU=1 python -c "from src.search.hybrid import Retriever; ..."
 
 도구 계층(`TOOLS["search_disclosure"]`)까지 CPU 로 통과. GPU 모드 회귀도
 5개 테스트 전부 통과 — 있는 곳에서는 예전 그대로 GPU 를 쓴다.
+
+### 평가용 API 서버 (2026-09-03)
+
+`GET /answer?question_id=&question=` 와 `GET /health`.
+`src/api/server.py` + `serve.sh`.
+
+#### FastAPI 를 넣지 않았다 — 넣으면 pydantic 이 올라간다
+
+명세는 FastAPI 였는데 이 PC 에 없다. `pip install --dry-run fastapi` 로 확인하니
+**pydantic 2.8.2 → 2.13.5, typing_extensions, pydantic_core 를 함께 올린다.**
+torch/FlagEmbedding 에 bge-m3 벡터가 묶여 있어 마감 직전에 건드릴 수 없다.
+
+그래서 **uvicorn 만으로 도는 순수 ASGI** 를 기본 경로로 두고, fastapi 가 있는
+환경에서는 그쪽을 쓴다. 판단 로직(`handle_health` `handle_answer`)은 한 곳에만
+있고 두 껍데기가 그것을 부른다 — **응답과 상태코드가 완전히 같다.**
+서버에서 `pip install fastapi` 를 해도 그대로 돌고, 안 해도 그대로 돈다.
+
+#### 계약
+
+| 계약 | 어떻게 |
+|---|---|
+| 모델·인덱스는 기동 시 한 번 | 백그라운드 스레드에서 `warmup()`. 그동안 `/answer` 는 503 |
+| 준비 전 503, 준비 후 200 | `/health` 가 `STATE["ready"]` 를 그대로 반영 |
+| **무슨 일이 있어도 200 + 규격 JSON** | `make_answer` 가 `BaseException` 까지 잡는다. answer 는 최악에도 "공시에서 확인되지 않음" |
+| 내부 데드라인 50초 | `loop.DEADLINE` 60 → 50. 60 이면 답을 만드는 도중에 상대가 끊는다 |
+| 모든 필드 문자열 | 반환 직전에 5개 키를 `str()` 로 통일 |
+
+5xx 를 뱉으면 재시도 2회를 낭비하고 결국 미응답이 된다. 그래서 **준비된 뒤의
+5xx 는 하나도 없어야 한다** — 라우팅 예외까지 200 으로 흡수한다.
+
+#### 한글이 깨진 줄 알았는데 클라이언트였다
+
+첫 실측에서 `question` echo 가 `SK???̴н?` 로 깨졌다. 서버를 의심했는데
+`_params` 를 직접 먹여 보니 정상이었다. `curl -v` 로 실제 바이트를 보니
+
+```
+> GET /health?x=%c7%cf%c0%cc HTTP/1.1     ← cp949. UTF-8 이면 %ED%95%98%EC%9D%B4
+```
+
+**Windows 셸의 curl 이 cp949 로 인코딩해 보내고 있었다.** 서버는 멀쩡했다.
+
+그래도 방어를 넣었다. percent-decoding 을 바이트 단계에서 직접 하고
+**UTF-8 → cp949 순으로 읽는다.** 올바른 UTF-8 은 첫 시도에서 통과하므로
+정상 요청에는 영향이 없다. 한국어 평가라 cp949 클라이언트가 올 수 있다.
+
+#### retrieved_context 를 만들려고 loop 에 documents 를 추가했다
+
+`sources` 는 `[회사 보고서명 …, 접수번호 …]` 문자열뿐이라 본문이 없다.
+`_keep_documents()` 가 `search_disclosure` 결과의 청크를 원문째 모은다
+(같은 청크는 한 번만, 인접 청크 보강본이 있으면 그쪽 — LLM 이 실제로 본 내용이다).
+
+#### 검증
+
+`eval/test_api.py` 가 ASGI 앱을 프로세스 안에서 직접 두드린다 — **LLM 0회.**
+준비 전 503 / 준비 후 200 / `answer()` 가 RuntimeError·MemoryError·SystemExit 를
+던져도 200 + 규격 5필드 / question 누락도 200 + 안내 / utf-8·cp949 왕복.
+
+실제 HTTP 는 LLM 1회만 썼다.
+
+```
+HTTP 200 · 13.0초 · 11,332 bytes · application/json; charset=utf-8
+필드 5개 전부 문자열 · retrieved_context 5,696자 · think_trace 349자 · answer 177자
+```
+
+`/health` 4ms, question 누락 4ms. 준비 34.5초.
+
+**답변 품질 문제 하나** — "SK하이닉스 2024년 연결 매출액" 에 **반기보고서(2024.06)의
+상반기 매출 12,394,044백만원**을 답했다. 사업보고서의 연간 확정치가 아니다.
+API 계약과는 무관하고 Agent 쪽 문제다(`report_type="annual"` 이 안 붙었다).
