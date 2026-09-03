@@ -210,6 +210,64 @@ def main() -> int:
         check(f"  {tool} 대안을 말한다",
               "회사명과 날짜" in (out.get("note") or ""))
 
+    # rcept_dt + fiscal_year — 어떤 문서에서는 구조적으로 0건이다
+    #
+    # 회귀 7번이 두 번 연속 fiscal_year=2024 + rcept_dt="20240130" 을 넣어 후보 0건을
+    # 받고 그대로 "확인되지 않습니다" 로 끝냈다. 조용한 0건은 모델이 못 고친다.
+    print("\n--- rcept_dt + fiscal_year 0건 안내 ---")
+    from src.tools import COMBO_NOTE, _explain_empty  # noqa: E402
+
+    def probe(res, dt, fy):
+        r = dict(res)
+        _explain_empty(r, dt, fy)
+        return COMBO_NOTE in (r.get("note") or "")
+
+    EMPTY = {"status": "not_found", "results": [], "n_candidates": 0,
+             "note": "필터 조건에 맞는 문서가 없다"}
+    check("  후보 0건 + 두 인자 → 안내가 붙는다", probe(EMPTY, "20240130", 2024))
+    r = dict(EMPTY)
+    _explain_empty(r, "20240130", 2024)
+    check("  status 는 not_found 그대로", r["status"] == "not_found", r["status"])
+    check("  기존 note 를 지우지 않는다", "필터 조건에 맞는 문서가 없다" in r["note"])
+
+    check("  후보가 있었으면 안 붙는다",
+          not probe({**EMPTY, "n_candidates": 2405,
+                     "note": "융합 후 남은 결과가 없다"}, "20240130", 2024))
+    check("  결과가 있으면 안 붙는다",
+          not probe({"status": "ok", "results": [{"x": 1}], "n_candidates": 10,
+                     "note": ""}, "20240130", 2024))
+    for dt, fy in (("20240130", None), (None, 2024), (None, None)):
+        check(f"  rcept_dt={dt} fiscal_year={fy} → 안 붙는다", not probe(EMPTY, dt, fy))
+    for args in ((None, None, None), ({}, "x", 1), ({"note": None}, "1", 1)):
+        try:
+            _explain_empty(*args)
+            ok = True
+        except Exception:                      # noqa: BLE001
+            ok = False
+        check(f"  _explain_empty{str(args)[:34]} 예외 없음", ok)
+
+    # note 에 적은 문서 유형이 실측과 맞는지 — 추측이면 안 된다
+    man = ROOT / "corpus" / "manifest.jsonl"
+    if man.is_file():
+        import re as _re
+
+        fy_pat = _re.compile(r"\((\d{4})[.\-/]\d{1,2}\)")
+        no_fy = {}
+        tot = 0
+        for line in man.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            d = json.loads(line)
+            tot += 1
+            if not fy_pat.search(str(d.get("report_nm") or "")):
+                g = str(d.get("doc_group"))
+                no_fy[g] = no_fy.get(g, 0) + 1
+        check("  fiscal_year 없는 유형 = exchange·major·holding",
+              set(no_fy) == {"exchange", "major", "holding"}, str(sorted(no_fy)))
+        check(f"  그 합계 {sum(no_fy.values()):,} 가 note 의 3,150 과 같다",
+              sum(no_fy.values()) == 3150, str(sum(no_fy.values())))
+        check(f"  전체 {tot:,} 가 note 의 4,204 와 같다", tot == 4204, str(tot))
+
     # tools.json 이 스키마로서 말이 되는지
     print("\n--- tools.json ---")
     cfg = json.loads((ROOT / "config" / "tools.json").read_text(encoding="utf-8"))

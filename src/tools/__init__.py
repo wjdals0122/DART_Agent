@@ -104,7 +104,46 @@ def _search_disclosure(query=None, corp_name=None, fiscal_year=None, rcept_no=No
                                 top_k=k, include_superseded=bool(include_superseded))
     res.pop("pool", None)                      # LLM 에게 줄 것이 아니다
     res["sources"] = _sources(res.get("results") or [])
+    _explain_empty(res, rcept_dt, fiscal_year)
     return res
+
+
+# rcept_dt + fiscal_year 는 어떤 문서에서는 **구조적으로** 0건이 된다.
+# 실측(corpus/manifest.jsonl 4,204건):
+#   periodic 1,054건 — 보고서명에 (YYYY.MM) 이 있어 fiscal_year 가 있다
+#   exchange 1,469 · holding 1,083 · major 598 — **전부(100%) 없다**
+# 세 유형은 report_nm 이 「단일판매ㆍ공급계약체결」 「주식등의대량보유상황보고서(일반)」
+# 처럼 기간 표기가 없어 fiscal_year 가 -1 이고, 어떤 연도와도 맞지 않는다.
+COMBO_NOTE = (
+    "rcept_dt 와 fiscal_year 를 함께 걸었다. 거래소공시(단일판매ㆍ공급계약 체결/해지, "
+    "신규시설투자, 투자판단 관련 주요경영사항)·주요사항보고서·지분공시(주식등의 "
+    "대량보유상황보고서)는 보고서명에 기간 표기가 없어 fiscal_year 가 없으므로 "
+    "이 조합은 항상 0건이 된다(코퍼스 4,204건 중 3,150건이 그렇다). "
+    "둘 중 하나를 빼고 다시 조회하라"
+)
+
+
+def _explain_empty(res: dict, rcept_dt, fiscal_year) -> None:
+    """필터가 0건을 낸 이유를 note 에 덧붙인다. 결과가 있으면 아무것도 안 한다.
+
+    【왜】 조용한 0건은 모델이 고칠 수가 없다. 실측으로 회귀 7번이 두 번 연속
+    `fiscal_year=2024` + `rcept_dt="20240130"` 을 넣어 후보 0건을 받고 그대로
+    "확인되지 않습니다" 로 끝냈다. 도구 결과 옆에서 말해야 먹힌다(이 리포의 교훈).
+
+    **후보가 0건일 때만** 붙인다. 후보가 있었는데 융합에서 걸러진 경우라면
+    이 조합 때문이 아니므로 "항상 0건" 이 거짓말이 된다.
+    """
+    try:
+        if res.get("results"):
+            return
+        if res.get("n_candidates"):            # 후보는 있었다 — 다른 이유다
+            return
+        if not (rcept_dt and fiscal_year is not None):
+            return
+        res["note"] = ((res.get("note") or "") + " · " + COMBO_NOTE).lstrip(" ·")
+    except Exception:                          # noqa: BLE001 — 안내가 답을 막으면 안 된다
+        import traceback
+        traceback.print_exc(file=sys.stderr)
 
 
 def _sources(hits) -> list:

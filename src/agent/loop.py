@@ -145,6 +145,23 @@ AUDIT_NO_SEARCH = (
     "아직 어떤 공시도 조회하지 않았다. search_disclosure 또는 "
     "list_disclosures 로 먼저 확인한 뒤 답하라."
 )
+# 검문 4 — 부른 도구가 **전부** 빗나갔는데 그대로 거절하려 할 때.
+#
+# 【왜 필요한가 — 2026-09-04 실측】
+# 회귀 7번이 `search_disclosure(fiscal_year=2024, rcept_dt="20240130")` 로 0건을 받고
+# **두 번 다** 재시도 없이 "찾을 수 없습니다" 로 끝냈다. 도구 결과 note 에
+# "이 조합은 항상 0건이 된다 · 둘 중 하나를 빼고 다시 조회하라" 가 실려 있었는데도.
+#
+# 루프에 이 되돌림이 없었다 — FORCE_TOOL 은 **도구 0회**일 때만, LIST_ONLY_NUDGE 는
+# **list 가 ok** 일 때만 발동한다. 그래서 not_found 한 번이면 문항이 끝났다.
+# 7번 하나가 아니라 **검색이 한 번 빗나간 모든 문항**에 걸린다.
+AUDIT_ALL_BAD = (
+    "조회한 모든 도구가 결과를 돌려주지 않았다. 마지막 도구 결과의 note 를 다시 읽고, "
+    "필터를 완화해 한 번 더 조회하라. 특히 rcept_dt·fiscal_year·doc_group 중 "
+    "불필요한 것을 빼라. 그래도 없으면 그때 확인되지 않음으로 답하라."
+)
+# 검문 4 의 거절 표현. 지시가 이 셋을 지목했다.
+_ALL_BAD_REFUSE = ("확인되지 않", "찾을 수 없", "확인할 수 없")
 
 # '4.55배' '234.73%' '3.06 퍼센트' 처럼 **숫자에 붙은** 비율·배수 표기만 잡는다.
 # 그냥 '배' 를 찾으면 배당·배출·배터리·분배가 전부 걸린다.
@@ -195,6 +212,24 @@ def refused_without_search(text: str, tool_calls: list) -> bool:
         if tool_calls:
             return False
         return any(w in (text or "") for w in _AUDIT_REFUSE)
+    except Exception:                          # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        return False
+
+
+def all_tools_failed(text: str, tool_calls: list) -> bool:
+    """도구를 불렀는데 **하나도** ok 가 아니고, 그대로 거절하려 하나.
+
+    `refused_without_search` 와 조건이 **배타적**이다 — 저쪽은 도구 0회, 이쪽은 1회 이상.
+    `LIST_ONLY_NUDGE` 와도 겹치지 않는다 — 그쪽은 list 가 ok 여야 발동한다.
+    """
+    try:
+        calls = tool_calls or []
+        if not calls:
+            return False
+        if any((c or {}).get("status") == "ok" for c in calls):
+            return False
+        return any(w in (text or "") for w in _ALL_BAD_REFUSE)
     except Exception:                          # noqa: BLE001
         traceback.print_exc(file=sys.stderr)
         return False
@@ -834,11 +869,14 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
             # 검문 순서는 계산 → 검색 없는 거절. 둘 다 걸려도 한 번만 되돌린다.
             if extra is not None and not audited and \
                     (deadline - (time.time() - t0)) >= AUDIT_MARGIN:
+                # elif 사슬이라 **하나만** 걸린다. `audited` 가 문항당 1회를 보장한다.
                 kind, note = None, None
                 if needs_calc(text, out["tool_calls"], out["documents"]):
                     kind, note = "calc", AUDIT_CALC
                 elif refused_without_search(text, out["tool_calls"]):
                     kind, note = "no_search", AUDIT_NO_SEARCH
+                elif all_tools_failed(text, out["tool_calls"]):
+                    kind, note = "all_bad", AUDIT_ALL_BAD
                 if kind:
                     audited = True
                     out["waste"]["audit"] = kind

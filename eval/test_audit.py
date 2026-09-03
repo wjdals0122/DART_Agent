@@ -28,7 +28,8 @@ from src.agent import clova, loop                      # noqa: E402
 from src.agent import usage as usage_mod               # noqa: E402
 
 usage_mod.set_enabled(False)                           # 비용 로그를 더럽히지 않는다
-from src.agent.loop import answer, needs_calc, refused_without_search  # noqa: E402
+from src.agent.loop import (all_tools_failed, answer,  # noqa: E402
+                            needs_calc, refused_without_search)
 
 FAIL = []
 
@@ -83,6 +84,35 @@ check("도구를 불렀으면 안 잡는다",
       not refused_without_search("확인되지 않습니다.", tc("search_disclosure")))
 check("거절이 아니면 안 잡는다",
       not refused_without_search("매출액은 300,870,903백만원이다.", []))
+
+print()
+print("=" * 74)
+print("2-B — 검문 4 판정: 부른 도구가 전부 빗나갔는데 거절하나")
+print("=" * 74)
+
+
+def bad(name, status="not_found"):
+    return [{"n": 1, "name": name, "status": status}]
+
+
+check("전부 not_found + 거절 → 잡는다",
+      refused := all_tools_failed("공시에서 찾을 수 없습니다.", bad("search_disclosure")))
+check("전부 error + 거절 → 잡는다",
+      all_tools_failed("확인되지 않습니다.", bad("list_disclosures", "error")))
+check("섞여 있어도 ok 가 하나라도 있으면 안 잡는다",
+      not all_tools_failed("찾을 수 없습니다.",
+                           bad("search_disclosure") + tc("search_disclosure")))
+check("도구 0회면 안 잡는다(검문 2 의 몫)",
+      not all_tools_failed("확인되지 않습니다.", []))
+check("거절이 아니면 안 잡는다",
+      not all_tools_failed("매출액은 300,870,903백만원이다.", bad("search_disclosure")))
+check("'확인할 수 없' 도 거절로 본다",
+      all_tools_failed("확인할 수 없습니다.", bad("search_disclosure")))
+
+# 검문 2 와 4 는 조건이 배타적이다 — 저쪽은 도구 0회, 이쪽은 1회 이상
+check("검문 2·4 가 동시에 참이 되지 않는다",
+      not (refused_without_search("확인되지 않습니다.", bad("search_disclosure"))
+           and all_tools_failed("확인되지 않습니다.", [])))
 
 print()
 print("=" * 74)
@@ -154,6 +184,115 @@ check("검문 기록이 남는다", r2["waste"]["audit"] in ("calc", "no_search"
 r3, st3 = run_with(["매출액은 300,870,903백만원이다. 근거는 위와 같다."])
 check("정상 답변은 검문에 안 걸린다", r3["waste"]["audit"] == "",
       repr(r3["waste"]["audit"]))
+
+print()
+print("=" * 74)
+print("4-B — 검문 4 가 루프에서 딱 한 턴만 더 준다")
+print("=" * 74)
+
+# 도구를 한 번 불러 not_found 를 받고, 모델은 계속 거절만 한다.
+import src.tools as T                                      # noqa: E402
+
+real_tools = dict(T.TOOLS)
+
+
+def run_all_bad(texts):
+    state = {"i": 0, "seen": [], "tool_calls": 0}
+
+    def fake(messages, **kw):
+        state["seen"].append([m.get("content") for m in messages])
+        i = state["i"]
+        state["i"] += 1
+        # 첫 턴에만 도구를 부른다. 그 뒤로는 거절 문장만 낸다.
+        if i == 0 and kw.get("extra"):
+            return {"ok": True, "text": "", "finish_reason": "tool_calls", "usage": {},
+                    "tool_calls": [{"id": "c1", "type": "function",
+                                    "function": {"name": "search_disclosure",
+                                                 "arguments": {"query": "x",
+                                                               "rcept_dt": "20240130",
+                                                               "fiscal_year": 2024}}}]}
+        return {"ok": True, "text": texts[min(i - 1, len(texts) - 1)],
+                "tool_calls": [], "finish_reason": "stop", "usage": {}}
+
+    T.TOOLS = dict(real_tools)
+    T.TOOLS["search_disclosure"] = lambda **kw: {
+        "status": "not_found", "results": [], "sources": [],
+        "note": "필터 조건에 맞는 문서가 없다 · rcept_dt 와 fiscal_year 를 함께 걸었다"}
+    clova.chat = fake
+    try:
+        return answer("질문", deadline=50.0), state
+    finally:
+        clova.chat = real_chat
+        T.TOOLS = real_tools
+
+
+r5, st5 = run_all_bad(["공시에서 찾을 수 없습니다."])
+check("검문 4 가 걸렸다", r5["waste"]["audit"] == "all_bad", repr(r5["waste"]["audit"]))
+last = st5["seen"][-1]
+check("검문 4 지시가 들어갔다", any(loop.AUDIT_ALL_BAD in (c or "") for c in last))
+check("검문 4 지시는 한 번만", sum(1 for c in last if c == loop.AUDIT_ALL_BAD) == 1)
+check("그래도 답은 나온다", bool(r5["answer"].strip()), r5["answer"][:40])
+check("LLM 3회 이하(도구턴 + 답변 + 검문 뒤 답변)", st5["usage"] if False else
+      (r5["usage"]["llm_calls"] <= 3), str(r5["usage"]["llm_calls"]))
+
+# 도구가 ok 를 돌려주면 검문 4 는 안 걸린다
+def run_ok():
+    state = {"i": 0}
+
+    def fake(messages, **kw):
+        i = state["i"]
+        state["i"] += 1
+        if i == 0 and kw.get("extra"):
+            return {"ok": True, "text": "", "finish_reason": "tool_calls", "usage": {},
+                    "tool_calls": [{"id": "c1", "type": "function",
+                                    "function": {"name": "search_disclosure",
+                                                 "arguments": {"query": "x"}}}]}
+        return {"ok": True, "text": "공시에서 찾을 수 없습니다.", "tool_calls": [],
+                "finish_reason": "stop", "usage": {}}
+
+    T.TOOLS = dict(real_tools)
+    T.TOOLS["search_disclosure"] = lambda **kw: {
+        "status": "ok", "results": [], "sources": ["[○○ 사업보고서]"], "note": ""}
+    clova.chat = fake
+    try:
+        return answer("질문", deadline=50.0)
+    finally:
+        clova.chat = real_chat
+        T.TOOLS = real_tools
+
+
+r6 = run_ok()
+check("도구가 ok 면 검문 4 가 안 걸린다", r6["waste"]["audit"] != "all_bad",
+      repr(r6["waste"]["audit"]))
+
+# 데드라인이 얼마 안 남으면 건너뛴다
+state7 = {"i": 0}
+
+
+def fake_tight(messages, **kw):
+    i = state7["i"]
+    state7["i"] += 1
+    if i == 0 and kw.get("extra"):
+        return {"ok": True, "text": "", "finish_reason": "tool_calls", "usage": {},
+                "tool_calls": [{"id": "c1", "type": "function",
+                                "function": {"name": "search_disclosure",
+                                             "arguments": {"query": "x"}}}]}
+    return {"ok": True, "text": "공시에서 찾을 수 없습니다.", "tool_calls": [],
+            "finish_reason": "stop", "usage": {}}
+
+
+T.TOOLS = dict(real_tools)
+T.TOOLS["search_disclosure"] = lambda **kw: {
+    "status": "not_found", "results": [], "sources": [], "note": "없다"}
+clova.chat = fake_tight
+try:
+    r7 = answer("질문", deadline=1.0)
+finally:
+    clova.chat = real_chat
+    T.TOOLS = real_tools
+check("데드라인 1초면 검문 4 를 건너뛴다", r7["waste"]["audit"] == "",
+      repr(r7["waste"]["audit"]))
+check("그래도 답은 나온다", bool(r7["answer"].strip()), r7["answer"][:40])
 
 print()
 print("=" * 74)
