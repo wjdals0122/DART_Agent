@@ -557,15 +557,22 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
     except Exception as e:                     # noqa: BLE001
         traceback.print_exc(file=sys.stderr)
         out["note"] = (out.get("note") or "") + f" · 상투구 제거 실패: {e}"
-    # 근거 절은 모델이 아니라 여기서 만든다. 형식이 흔들리면 안 된다
+    # 근거 절은 모델이 아니라 여기서 만든다. 형식이 흔들리면 안 된다.
+    #
+    # 【retrieved 를 따로 붙드는 이유 — 2026-09-03】
+    # attach_sources 는 이제 '본문이 가리킨 것' 만 남기므로 out["sources"] 가 비어 나올 수
+    # 있다. 그런데 아래 무근거 표시는 **도구가 아무것도 못 가져왔는가**를 물어야 한다.
+    # 필터링된 목록으로 물으면, 문서를 제대로 조회하고 답한 문항에까지
+    # "공시 조회로 확인되지 않았습니다" 딱지가 붙는다(실측: e2e 재실행 3번째 문항).
+    retrieved = list(out.get("sources") or [])
     try:
-        out["answer"], out["sources"] = attach_sources(out["answer"], out.get("sources") or [])
+        out["answer"], out["sources"] = attach_sources(out["answer"], retrieved)
     except Exception as e:                     # noqa: BLE001 — 붙이다 죽으면 안 된다
         traceback.print_exc(file=sys.stderr)
         out["note"] = (out.get("note") or "") + f" · 근거 절 조립 실패: {e}"
     # 근거 0건인데 숫자·사실을 단정했으면 지우지 말고 표시만 한다
     try:
-        if has_unsourced_claim(out["answer"], out.get("sources") or []):
+        if has_unsourced_claim(out["answer"], retrieved):
             out["unsourced_claim"] = True
             out["answer"] = mark_unsourced(out["answer"])
     except Exception as e:                     # noqa: BLE001

@@ -153,6 +153,51 @@ for ln in fixed.splitlines():
 
 print()
 print("=" * 74)
+print("6 — 근거를 걸러도 '무근거' 딱지가 잘못 붙지 않는다")
+print("=" * 74)
+#
+# attach_sources 가 이제 '본문이 가리킨 것' 만 남기므로 sources 가 비어 나올 수 있다.
+# 무근거 표시는 **도구가 아무것도 못 가져왔는가**를 물어야 한다. 필터링된 목록으로
+# 물으면 제대로 조회하고 답한 문항에까지 딱지가 붙는다(실측: e2e 재실행 3번째 문항).
+from src.agent import clova, loop as loop_mod            # noqa: E402
+from src.agent import usage as usage_mod                 # noqa: E402
+
+usage_mod.set_enabled(False)
+real_chat = clova.chat
+ANSWER = "제76기 연결 영업이익은 2,357,283,417,485원입니다."
+
+
+def fake_chat(messages, **kw):
+    """도구를 한 번 부르고, 도구가 없으면 수치를 답한다."""
+    if kw.get("extra"):
+        return {"ok": True, "text": "", "finish_reason": "tool_calls", "usage": {},
+                "tool_calls": [{"id": "c1", "type": "function",
+                                "function": {"name": "search_disclosure",
+                                             "arguments": {"query": "영업이익"}}}]}
+    return {"ok": True, "text": ANSWER, "tool_calls": [], "finish_reason": "stop",
+            "usage": {}}
+
+
+import src.tools as T                                    # noqa: E402
+
+real_tools = dict(T.TOOLS)
+T.TOOLS = dict(T.TOOLS)
+T.TOOLS["search_disclosure"] = lambda **kw: {
+    "status": "ok", "results": [], "sources": [S_SAM], "note": ""}
+clova.chat = fake_chat
+try:
+    r = loop_mod.answer("영업이익은?", deadline=50.0)
+finally:
+    clova.chat = real_chat
+    T.TOOLS = real_tools
+
+check("조회는 했으므로 무근거 딱지가 없다", not r["unsourced_claim"],
+      repr(r["answer"][:70]))
+check("근거 절은 조회 범위로 채워졌다", "조회:" in r["answer"], repr(r["answer"][-70:]))
+check("본문 수치는 그대로", "2,357,283,417,485" in r["answer"])
+
+print()
+print("=" * 74)
 if FAIL:
     print(f"{len(FAIL)}건 실패: " + ", ".join(FAIL))
     sys.exit(1)
