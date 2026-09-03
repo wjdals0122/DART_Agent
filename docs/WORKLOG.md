@@ -3085,3 +3085,64 @@ HTTP 200 · 13.0초 · 11,332 bytes · application/json; charset=utf-8
 **답변 품질 문제 하나** — "SK하이닉스 2024년 연결 매출액" 에 **반기보고서(2024.06)의
 상반기 매출 12,394,044백만원**을 답했다. 사업보고서의 연간 확정치가 아니다.
 API 계약과는 무관하고 Agent 쪽 문제다(`report_type="annual"` 이 안 붙었다).
+
+---
+
+## step7-A — 서버에 올리는 절차를 한 줄로 만들었다 (2026-09-03)
+
+### 왜
+
+API 서버 코드(`step7`)와 CPU 폴백(`step6-L`)은 커밋했는데 **서버에는 아직 안 올라가
+있다.** 지금 `49.50.141.125` 의 80 포트에는 아무것도 안 떠 있다(TCP 접속 거부).
+22 포트는 열려 있다.
+
+올리는 일을 손으로 하면 파일마다 비밀번호를 묻고, 무엇을 빠뜨렸는지 알 수 없다.
+9/7 15:00 사전 점검까지 **여러 번 올리게 될 것**이므로 절차를 파일로 굳혔다.
+
+### 무엇을 만들었나 — `scripts/deploy.sh`
+
+```bash
+bash scripts/deploy.sh                 # 올리고 재기동 + /health 가 200 될 때까지 기다린다
+bash scripts/deploy.sh --no-restart    # 올리기만
+HOST=root@1.2.3.4 PORT=8080 bash scripts/deploy.sh
+```
+
+하는 일 순서:
+
+1. `src config prompts eval scripts serve.sh requirements.txt` 를 **tar 하나로 묶는다**
+   (`__pycache__` 제외, **440KB · 145개 파일**)
+2. `scp` 로 한 번에 보낸다 — 파일마다 보내면 비밀번호를 그 횟수만큼 묻는다
+3. 원격에서 풀고 → `serve.sh stop` → `serve.sh` 기동
+4. `/health` 가 `"ready": true` 를 줄 때까지 **2초 간격으로 최대 120초** 기다린다
+5. 안 되면 `logs/api.log` 끝 40줄을 그 자리에서 찍는다
+6. 마지막에 **바깥에서** `/health` 를 한 번 더 친다 — 방화벽이 막고 있으면 여기서 드러난다
+
+**보내지 않는 것**: `data/` `corpus/` `logs/` `.env`. 인덱스와 모델 캐시(4.3GB)는
+서버에 이미 있고, 코드만 갈아끼우면 된다. `.env` 의 API 키도 서버 것을 그대로 둔다.
+
+비밀번호는 두 번 묻는다(scp 한 번, ssh 한 번). ssh 키를 넣으면 안 묻는다 —
+방법을 스크립트 주석에 적어 두었다.
+
+### requirements.txt 에 빠져 있던 넷을 채웠다
+
+서버 이관 때 하나씩 막혔던 것들이다. 이제 다른 곳에 올려도 같은 데서 안 막힌다.
+
+| 패키지 | 어디에 쓰나 | 지금 버전 |
+|---|---|---|
+| `kiwipiepy` | 한국어 형태소 토크나이저. BM25 색인·질의 양쪽 | 0.23.2 |
+| `python-dotenv` | `.env` 의 `CLOVA_API_KEY` 를 읽는다 | 0.21.0 |
+| `requests` | HyperCLOVA X HTTP 호출 | 2.32.3 |
+| `uvicorn` | 평가용 API 서버를 띄운다 | 0.40.0 |
+
+`uvicorn` 은 앞선 기록에 빠져 있었는데 **없으면 서버가 아예 안 뜬다**(`src/api/server.py`
+마지막 줄이 `uvicorn.run`). `fastapi` 는 **일부러 안 넣었다** — pydantic 을 함께
+올려 bge-m3 환경을 흔든다. 주석에 이유를 남겼다.
+
+### 확인한 것
+
+- `eval/test_api.py` **전부 통과 · LLM 호출 0회** (계약이 그대로임을 확인)
+- tar 묶기 실제 실행 — 440KB / 145파일 / `src/api/server.py` 와 `serve.sh` 포함
+- `bash -n scripts/deploy.sh` 구문 검사 통과
+- 서버 포트 실측 — **22 열림 / 80 닫힘**(아직 안 떠 있다)
+
+`deploy.sh` 의 원격 구간은 **아직 실제로 못 돌려 봤다.** ssh 비밀번호가 필요하다.
