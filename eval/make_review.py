@@ -93,6 +93,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True, help="이번 실행 이름 (e2e_v4)")
     ap.add_argument("--prev", default=None, help="비교할 직전 실행 이름 (e2e_v2)")
+    # 기본 경로에 사람이 이미 판정을 채워 넣은 파일이 있을 수 있다(e2e_v2_review.md).
+    # 덮어쓰기 전에 확인을 받으려면 --out 으로 다른 이름을 준다.
+    ap.add_argument("--out", default=None, help="출력 경로 (기본 reports/<run>_review.md)")
     a = ap.parse_args()
 
     rows = load(a.run)
@@ -171,7 +174,10 @@ def main() -> int:
     for i, r in enumerate(rows, 1):
         p = prev.get(r["qid"])
         chg = "비교 없음" if p is None else ("**있음**" if body_of(p) != body_of(r) else "없음")
-        L.append(f"| {i} | {cell(r.get('question'))} | {two_lines(r.get('answer'))} | "
+        # 질문은 표에서 잘라 읽기 좋게 한다. 전문은 아래 채점란에 그대로 있다.
+        q = cell(r.get("question"))
+        q = q if len(q) <= 130 else q[:130] + "…"
+        L.append(f"| {i} | {q} | {two_lines(r.get('answer'))} | "
                  f"{docs_of(r)} | {tools_of(r)} | {float(r.get('elapsed') or 0):.0f}초 | "
                  f"{chg} |")
     L.append("")
@@ -185,7 +191,7 @@ def main() -> int:
               "정오( )　실패유형( )　메모( )", ""]
 
     REPORTS.mkdir(parents=True, exist_ok=True)
-    out = REPORTS / f"{a.run}_review.md"
+    out = Path(a.out) if a.out else (REPORTS / f"{a.run}_review.md")
     out.write_text("\n".join(L), encoding="utf-8", newline="\n")
 
     print(f"문항 {n}건 · {cost:,.0f}원 · {sec / 60:.1f}분 · LLM {llm}회")
