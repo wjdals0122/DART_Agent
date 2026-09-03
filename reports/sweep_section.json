@@ -1,0 +1,977 @@
+{
+ "full": {
+  "0.0": {
+   "n": 18,
+   "recall@5": 0.3611111111111111,
+   "hit@5": 0.3888888888888889,
+   "recall@20": 0.7222222222222222,
+   "hit@20": 0.7222222222222222,
+   "mrr": 0.1900712429221201,
+   "ms": 333.17357963985864
+  },
+  "0.3": {
+   "n": 18,
+   "recall@5": 0.3055555555555556,
+   "hit@5": 0.3333333333333333,
+   "recall@20": 0.7777777777777778,
+   "hit@20": 0.7777777777777778,
+   "mrr": 0.18906047656047656,
+   "ms": 96.78355852762859
+  },
+  "0.5": {
+   "n": 18,
+   "recall@5": 0.3611111111111111,
+   "hit@5": 0.3888888888888889,
+   "recall@20": 0.75,
+   "hit@20": 0.7777777777777778,
+   "mrr": 0.20221984805318138,
+   "ms": 83.12833309173584
+  },
+  "1.0": {
+   "n": 18,
+   "recall@5": 0.2777777777777778,
+   "hit@5": 0.2777777777777778,
+   "recall@20": 0.7222222222222222,
+   "hit@20": 0.7777777777777778,
+   "mrr": 0.17955246913580247,
+   "ms": 132.93931219312879
+  }
+ },
+ "short": {
+  "0.0": {
+   "n": 3,
+   "recall@5": 0.0,
+   "hit@5": 0.0,
+   "recall@20": 0.5,
+   "hit@20": 0.6666666666666666,
+   "mrr": 0.04738562091503268,
+   "ms": 79.38520113627116
+  },
+  "0.3": {
+   "n": 3,
+   "recall@5": 0.0,
+   "hit@5": 0.0,
+   "recall@20": 0.3333333333333333,
+   "hit@20": 0.3333333333333333,
+   "mrr": 0.025641025641025644,
+   "ms": 76.41959190368652
+  },
+  "0.5": {
+   "n": 3,
+   "recall@5": 0.0,
+   "hit@5": 0.0,
+   "recall@20": 0.3333333333333333,
+   "hit@20": 0.3333333333333333,
+   "mrr": 0.025641025641025644,
+   "ms": 72.18384742736816
+  },
+  "1.0": {
+   "n": 3,
+   "recall@5": 0.0,
+   "hit@5": 0.0,
+   "recall@20": 0.3333333333333333,
+   "hit@20": 0.3333333333333333,
+   "mrr": 0.025641025641025644,
+   "ms": 70.62276204427083
+  }
+ },
+ "raw": {
+  "full_0.0": [
+   {
+    "qid": "LG생활건강__multi_closed",
+    "query": "Beauty 사업 부문 매출",
+    "error": null,
+    "ms": 3812.346935272217,
+    "ranks": [
+     4,
+     17
+    ],
+    "n_gold": 2,
+    "status": "ok"
+   },
+   {
+    "qid": "LIG디펜스앤에어로스페이스__multi_closed",
+    "query": "PGM 정밀 타격 부문 매출",
+    "error": null,
+    "ms": 116.72568321228027,
+    "ranks": [
+     2
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "기아__multi_closed",
+    "query": "연결 영업 이익",
+    "error": null,
+    "ms": 123.98505210876465,
+    "ranks": [
+     8,
+     9
+    ],
+    "n_gold": 2,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성바이오로직스__multi_closed",
+    "query": "연결 포괄손익계산서 영업이익 매출액 매출원가",
+    "error": null,
+    "ms": 138.84973526000977,
+    "ranks": [
+     4
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성중공업__multi_closed",
+    "query": "주요 제품 현황 조선해양 매출액 비율]",
+    "error": null,
+    "ms": 124.18079376220703,
+    "ranks": [
+     19
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "CJ제일제당__search_closed",
+    "query": "요약연결재무정보 지배기업의 소유주지분 비지배지분 당기순이익",
+    "error": null,
+    "ms": 137.67647743225098,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "HD현대중공업__search_closed",
+    "query": "회사채 미상환 잔액 잔여만기 공모 사모 합계",
+    "error": null,
+    "ms": 124.62949752807617,
+    "ranks": [
+     10
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "LG유플러스__search_closed",
+    "query": "II. 사업 2. 주요 제품 서비스 현황 엘지헬로비전",
+    "error": null,
+    "ms": 138.49973678588867,
+    "ranks": [
+     3
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "JYP Ent__multi_closed",
+    "query": "연결 음반 음원 사업 매출",
+    "error": null,
+    "ms": 123.36516380310059,
+    "ranks": [
+     1
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "NAVER__search_closed",
+    "query": "II. 사업 서비스 영업 수익 콘텐츠 부문 연결",
+    "error": null,
+    "ms": 129.20856475830078,
+    "ranks": [
+     3
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "OCI홀딩스__search_closed",
+    "query": "II. 사업 2. 주요 제품 서비스 보고 부문",
+    "error": null,
+    "ms": 125.02861022949219,
+    "ranks": [
+     4
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "SK텔레콤__search_closed",
+    "query": "II. 사업 4. 매출 수주 상황 영업 부문",
+    "error": null,
+    "ms": 128.0815601348877,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "고려아연__search_closed",
+    "query": "II. 사업 2. 주요 제품 서비스 품목 매출액",
+    "error": null,
+    "ms": 129.0431022644043,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "레인보우로보틱스__search_closed",
+    "query": "판매 경로 항목 정밀 지향 마운트 국가 대리점",
+    "error": null,
+    "ms": 119.01521682739258,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성생명__search_closed",
+    "query": "II. 사업 1. 개요 수입 보험료 상품 사망",
+    "error": null,
+    "ms": 131.73484802246094,
+    "ranks": [
+     14
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성전기__search_closed",
+    "query": "III. 재무 6. 배당 주요 지표 주당 현금",
+    "error": null,
+    "ms": 133.00395011901855,
+    "ranks": [
+     18
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성전자__search_closed",
+    "query": "II. 사업 6. 주요 계약 연구 개발 활동",
+    "error": null,
+    "ms": 128.10969352722168,
+    "ranks": [
+     10
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성화재해상보험__search_closed",
+    "query": "II. 사업 1. 개요 FY 상품 보험 수익",
+    "error": null,
+    "ms": 133.63981246948242,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   }
+  ],
+  "full_0.3": [
+   {
+    "qid": "LG생활건강__multi_closed",
+    "query": "Beauty 사업 부문 매출",
+    "error": null,
+    "ms": 132.9631805419922,
+    "ranks": [
+     4,
+     20
+    ],
+    "n_gold": 2,
+    "status": "ok"
+   },
+   {
+    "qid": "LIG디펜스앤에어로스페이스__multi_closed",
+    "query": "PGM 정밀 타격 부문 매출",
+    "error": null,
+    "ms": 130.13386726379395,
+    "ranks": [
+     2
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "기아__multi_closed",
+    "query": "연결 영업 이익",
+    "error": null,
+    "ms": 133.53776931762695,
+    "ranks": [
+     8,
+     13
+    ],
+    "n_gold": 2,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성바이오로직스__multi_closed",
+    "query": "연결 포괄손익계산서 영업이익 매출액 매출원가",
+    "error": null,
+    "ms": 135.21575927734375,
+    "ranks": [
+     4
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성중공업__multi_closed",
+    "query": "주요 제품 현황 조선해양 매출액 비율]",
+    "error": null,
+    "ms": 149.85227584838867,
+    "ranks": [
+     6
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "CJ제일제당__search_closed",
+    "query": "요약연결재무정보 지배기업의 소유주지분 비지배지분 당기순이익",
+    "error": null,
+    "ms": 90.20066261291504,
+    "ranks": [
+     13
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "HD현대중공업__search_closed",
+    "query": "회사채 미상환 잔액 잔여만기 공모 사모 합계",
+    "error": null,
+    "ms": 69.3058967590332,
+    "ranks": [
+     10
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "LG유플러스__search_closed",
+    "query": "II. 사업 2. 주요 제품 서비스 현황 엘지헬로비전",
+    "error": null,
+    "ms": 93.02806854248047,
+    "ranks": [
+     3
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "JYP Ent__multi_closed",
+    "query": "연결 음반 음원 사업 매출",
+    "error": null,
+    "ms": 77.67438888549805,
+    "ranks": [
+     1
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "NAVER__search_closed",
+    "query": "II. 사업 서비스 영업 수익 콘텐츠 부문 연결",
+    "error": null,
+    "ms": 79.39743995666504,
+    "ranks": [
+     10
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "OCI홀딩스__search_closed",
+    "query": "II. 사업 2. 주요 제품 서비스 보고 부문",
+    "error": null,
+    "ms": 80.67154884338379,
+    "ranks": [
+     4
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "SK텔레콤__search_closed",
+    "query": "II. 사업 4. 매출 수주 상황 영업 부문",
+    "error": null,
+    "ms": 79.90598678588867,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "고려아연__search_closed",
+    "query": "II. 사업 2. 주요 제품 서비스 품목 매출액",
+    "error": null,
+    "ms": 82.99994468688965,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "레인보우로보틱스__search_closed",
+    "query": "판매 경로 항목 정밀 지향 마운트 국가 대리점",
+    "error": null,
+    "ms": 71.09427452087402,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성생명__search_closed",
+    "query": "II. 사업 1. 개요 수입 보험료 상품 사망",
+    "error": null,
+    "ms": 86.96866035461426,
+    "ranks": [
+     13
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성전기__search_closed",
+    "query": "III. 재무 6. 배당 주요 지표 주당 현금",
+    "error": null,
+    "ms": 83.61673355102539,
+    "ranks": [
+     11
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성전자__search_closed",
+    "query": "II. 사업 6. 주요 계약 연구 개발 활동",
+    "error": null,
+    "ms": 81.14457130432129,
+    "ranks": [
+     12
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성화재해상보험__search_closed",
+    "query": "II. 사업 1. 개요 FY 상품 보험 수익",
+    "error": null,
+    "ms": 84.39302444458008,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   }
+  ],
+  "full_0.5": [
+   {
+    "qid": "LG생활건강__multi_closed",
+    "query": "Beauty 사업 부문 매출",
+    "error": null,
+    "ms": 72.12638854980469,
+    "ranks": [
+     4
+    ],
+    "n_gold": 2,
+    "status": "ok"
+   },
+   {
+    "qid": "LIG디펜스앤에어로스페이스__multi_closed",
+    "query": "PGM 정밀 타격 부문 매출",
+    "error": null,
+    "ms": 68.12143325805664,
+    "ranks": [
+     2
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "기아__multi_closed",
+    "query": "연결 영업 이익",
+    "error": null,
+    "ms": 76.26032829284668,
+    "ranks": [
+     10,
+     18
+    ],
+    "n_gold": 2,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성바이오로직스__multi_closed",
+    "query": "연결 포괄손익계산서 영업이익 매출액 매출원가",
+    "error": null,
+    "ms": 72.63898849487305,
+    "ranks": [
+     2
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성중공업__multi_closed",
+    "query": "주요 제품 현황 조선해양 매출액 비율]",
+    "error": null,
+    "ms": 73.6534595489502,
+    "ranks": [
+     5
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "CJ제일제당__search_closed",
+    "query": "요약연결재무정보 지배기업의 소유주지분 비지배지분 당기순이익",
+    "error": null,
+    "ms": 88.87624740600586,
+    "ranks": [
+     9
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "HD현대중공업__search_closed",
+    "query": "회사채 미상환 잔액 잔여만기 공모 사모 합계",
+    "error": null,
+    "ms": 70.05858421325684,
+    "ranks": [
+     10
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "LG유플러스__search_closed",
+    "query": "II. 사업 2. 주요 제품 서비스 현황 엘지헬로비전",
+    "error": null,
+    "ms": 91.44377708435059,
+    "ranks": [
+     4
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "JYP Ent__multi_closed",
+    "query": "연결 음반 음원 사업 매출",
+    "error": null,
+    "ms": 76.89237594604492,
+    "ranks": [
+     1
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "NAVER__search_closed",
+    "query": "II. 사업 서비스 영업 수익 콘텐츠 부문 연결",
+    "error": null,
+    "ms": 83.02426338195801,
+    "ranks": [
+     10
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "OCI홀딩스__search_closed",
+    "query": "II. 사업 2. 주요 제품 서비스 보고 부문",
+    "error": null,
+    "ms": 73.47702980041504,
+    "ranks": [
+     4
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "SK텔레콤__search_closed",
+    "query": "II. 사업 4. 매출 수주 상황 영업 부문",
+    "error": null,
+    "ms": 84.93566513061523,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "고려아연__search_closed",
+    "query": "II. 사업 2. 주요 제품 서비스 품목 매출액",
+    "error": null,
+    "ms": 82.20934867858887,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "레인보우로보틱스__search_closed",
+    "query": "판매 경로 항목 정밀 지향 마운트 국가 대리점",
+    "error": null,
+    "ms": 73.83346557617188,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성생명__search_closed",
+    "query": "II. 사업 1. 개요 수입 보험료 상품 사망",
+    "error": null,
+    "ms": 86.49253845214844,
+    "ranks": [
+     13
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성전기__search_closed",
+    "query": "III. 재무 6. 배당 주요 지표 주당 현금",
+    "error": null,
+    "ms": 84.60092544555664,
+    "ranks": [
+     8
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성전자__search_closed",
+    "query": "II. 사업 6. 주요 계약 연구 개발 활동",
+    "error": null,
+    "ms": 115.18406867980957,
+    "ranks": [
+     13
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성화재해상보험__search_closed",
+    "query": "II. 사업 1. 개요 FY 상품 보험 수익",
+    "error": null,
+    "ms": 122.48110771179199,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   }
+  ],
+  "full_1.0": [
+   {
+    "qid": "LG생활건강__multi_closed",
+    "query": "Beauty 사업 부문 매출",
+    "error": null,
+    "ms": 129.57763671875,
+    "ranks": [
+     8
+    ],
+    "n_gold": 2,
+    "status": "ok"
+   },
+   {
+    "qid": "LIG디펜스앤에어로스페이스__multi_closed",
+    "query": "PGM 정밀 타격 부문 매출",
+    "error": null,
+    "ms": 120.56374549865723,
+    "ranks": [
+     6
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "기아__multi_closed",
+    "query": "연결 영업 이익",
+    "error": null,
+    "ms": 128.12566757202148,
+    "ranks": [
+     16
+    ],
+    "n_gold": 2,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성바이오로직스__multi_closed",
+    "query": "연결 포괄손익계산서 영업이익 매출액 매출원가",
+    "error": null,
+    "ms": 132.3678493499756,
+    "ranks": [
+     2
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성중공업__multi_closed",
+    "query": "주요 제품 현황 조선해양 매출액 비율]",
+    "error": null,
+    "ms": 123.71492385864258,
+    "ranks": [
+     5
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "CJ제일제당__search_closed",
+    "query": "요약연결재무정보 지배기업의 소유주지분 비지배지분 당기순이익",
+    "error": null,
+    "ms": 140.70582389831543,
+    "ranks": [
+     3
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "HD현대중공업__search_closed",
+    "query": "회사채 미상환 잔액 잔여만기 공모 사모 합계",
+    "error": null,
+    "ms": 125.33402442932129,
+    "ranks": [
+     10
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "LG유플러스__search_closed",
+    "query": "II. 사업 2. 주요 제품 서비스 현황 엘지헬로비전",
+    "error": null,
+    "ms": 141.4351463317871,
+    "ranks": [
+     10
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "JYP Ent__multi_closed",
+    "query": "연결 음반 음원 사업 매출",
+    "error": null,
+    "ms": 126.28173828125,
+    "ranks": [
+     1
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "NAVER__search_closed",
+    "query": "II. 사업 서비스 영업 수익 콘텐츠 부문 연결",
+    "error": null,
+    "ms": 141.13879203796387,
+    "ranks": [
+     15
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "OCI홀딩스__search_closed",
+    "query": "II. 사업 2. 주요 제품 서비스 보고 부문",
+    "error": null,
+    "ms": 125.75364112854004,
+    "ranks": [
+     9
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "SK텔레콤__search_closed",
+    "query": "II. 사업 4. 매출 수주 상황 영업 부문",
+    "error": null,
+    "ms": 143.74184608459473,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "고려아연__search_closed",
+    "query": "II. 사업 2. 주요 제품 서비스 품목 매출액",
+    "error": null,
+    "ms": 136.47174835205078,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "레인보우로보틱스__search_closed",
+    "query": "판매 경로 항목 정밀 지향 마운트 국가 대리점",
+    "error": null,
+    "ms": 124.93777275085449,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성생명__search_closed",
+    "query": "II. 사업 1. 개요 수입 보험료 상품 사망",
+    "error": null,
+    "ms": 144.2434787750244,
+    "ranks": [
+     15
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성전기__search_closed",
+    "query": "III. 재무 6. 배당 주요 지표 주당 현금",
+    "error": null,
+    "ms": 141.88694953918457,
+    "ranks": [
+     3
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성전자__search_closed",
+    "query": "II. 사업 6. 주요 계약 연구 개발 활동",
+    "error": null,
+    "ms": 128.57747077941895,
+    "ranks": [
+     15
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성화재해상보험__search_closed",
+    "query": "II. 사업 1. 개요 FY 상품 보험 수익",
+    "error": null,
+    "ms": 138.04936408996582,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   }
+  ],
+  "short_0.0": [
+   {
+    "qid": "LG생활건강__multi_closed",
+    "query": "부문 매출",
+    "error": null,
+    "ms": 81.57849311828613,
+    "ranks": [
+     17
+    ],
+    "n_gold": 2,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성바이오로직스__multi_closed",
+    "query": "연결 매출액",
+    "error": null,
+    "ms": 78.63354682922363,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성전기__search_closed",
+    "query": "배당 주당",
+    "error": null,
+    "ms": 77.94356346130371,
+    "ranks": [
+     12
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   }
+  ],
+  "short_0.3": [
+   {
+    "qid": "LG생활건강__multi_closed",
+    "query": "부문 매출",
+    "error": null,
+    "ms": 87.31245994567871,
+    "ranks": [],
+    "n_gold": 2,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성바이오로직스__multi_closed",
+    "query": "연결 매출액",
+    "error": null,
+    "ms": 72.0832347869873,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성전기__search_closed",
+    "query": "배당 주당",
+    "error": null,
+    "ms": 69.86308097839355,
+    "ranks": [
+     13
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   }
+  ],
+  "short_0.5": [
+   {
+    "qid": "LG생활건강__multi_closed",
+    "query": "부문 매출",
+    "error": null,
+    "ms": 67.98386573791504,
+    "ranks": [],
+    "n_gold": 2,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성바이오로직스__multi_closed",
+    "query": "연결 매출액",
+    "error": null,
+    "ms": 75.32119750976562,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성전기__search_closed",
+    "query": "배당 주당",
+    "error": null,
+    "ms": 73.24647903442383,
+    "ranks": [
+     13
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   }
+  ],
+  "short_1.0": [
+   {
+    "qid": "LG생활건강__multi_closed",
+    "query": "부문 매출",
+    "error": null,
+    "ms": 70.84083557128906,
+    "ranks": [],
+    "n_gold": 2,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성바이오로직스__multi_closed",
+    "query": "연결 매출액",
+    "error": null,
+    "ms": 70.33181190490723,
+    "ranks": [],
+    "n_gold": 1,
+    "status": "ok"
+   },
+   {
+    "qid": "삼성전기__search_closed",
+    "query": "배당 주당",
+    "error": null,
+    "ms": 70.69563865661621,
+    "ranks": [
+     13
+    ],
+    "n_gold": 1,
+    "status": "ok"
+   }
+  ]
+ }
+}

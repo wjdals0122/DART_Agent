@@ -56,6 +56,8 @@ AUG_HEAD = "[인접 청크에서 보강: 단위·제목]"
 AUG_NEXT = "[인접 청크에서 보강: 다음 청크의 표]"
 AUG_BODY = "[여기부터 검색된 청크 원문]"
 _NONDIGIT = re.compile(r"[^0-9]")
+# 절 제목 대조용 — 공백·구분자·구두점을 지우고 붙여서 본다
+_NORM_TITLE = re.compile(r"[\s>·\-—_()\[\]{}.,:;'\"]+")
 _BUILT = 0          # 이 프로세스에서 Retriever 를 몇 번 만들었나
 _FY = re.compile(r"\((\d{4})[.\-/](\d{1,2})\)")
 
@@ -383,18 +385,64 @@ class Retriever:
 
     # ---------------------------------------------------------------- 4. RRF
 
+    def _section_scores(self, cand: np.ndarray, query: str, vsc: np.ndarray,
+                        bsc: np.ndarray, top_m: int) -> np.ndarray:
+        """절 제목이 질의어를 얼마나 담고 있는지. 0~1. 나머지는 0.
+
+        【왜 후보 전체가 아니라 top-M 합집합만 보는가】
+        절 제목은 id_map 에 없고 청크 저장소를 행마다 seek 해서 읽어야 한다.
+        후보가 수천~수십만이면 그걸 다 읽는 값이 검색 시간을 통째로 잡아먹는다.
+        어차피 RRF 는 각 리스트 top-M 안에 든 것만 쓰므로(C7), 두 리스트의
+        top-M 합집합 밖은 융합에 기여할 수 없다. 그 밖은 읽지 않고 0 으로 둔다.
+
+        【점수는 '질의어 몇 개가 제목에 있나' 뿐이다】
+        BM25 를 제목에 다시 돌리지 않는다. 제목은 짧은 명사구라 길이 정규화가
+        의미 없고, 새 색인을 만들면 행 순서 계약(CLAUDE.md 3)에 물건이 하나 더 는다.
+        """
+        from src.search.tokenize_ko import tokenize
+
+        n = len(cand)
+        out = np.zeros(n, dtype=np.float32)
+        toks = {t for t in tokenize(query or "") if len(t) >= 2}
+        if not toks:
+            return out
+
+        M = min(top_m, n)
+        pick = set()
+        for sc in (vsc, bsc):
+            top = np.argpartition(-sc, M - 1)[:M] if M < n else np.arange(n)
+            pick.update(int(i) for i in top)
+
+        for i in pick:
+            rec = self.store.get(int(cand[i])) or {}
+            title = " ".join(rec.get("section_path") or [])
+            if not title:
+                continue
+            flat = _NORM_TITLE.sub("", title).lower()
+            hit = sum(1 for t in toks if t.lower() in flat)
+            if hit:
+                out[i] = hit / len(toks)
+        return out
+
     def _rrf(self, vsc: np.ndarray, bsc: np.ndarray, w_vec: float = 1.0,
-             w_bm25: float = 1.0, top_m: int = TOP_M, K: int = RRF_K) -> np.ndarray:
+             w_bm25: float = 1.0, top_m: int = TOP_M, K: int = RRF_K,
+             ssc: np.ndarray | None = None, w_section: float = 0.0) -> np.ndarray:
         """C7 — 각 리스트의 top-M 안에 든 후보만 기여한다.
 
         후보 전체에 순위를 매겨 융합하면, 질의어를 하나도 포함하지 않은 문서가
         argsort 에서 임의의 중간 순위를 배정받아 그 순위가 점수에 기여한다.
         BM25 0점은 '그 리스트에 없음' 으로 취급해 버린다.
+
+        `ssc`(절 제목 점수)는 **선택**이다. w_section=0 이면 리스트 자체가 없다 —
+        기본 동작은 vec/bm25 두 리스트 그대로다.
         """
         n = len(vsc)
         out = np.zeros(n, dtype=np.float32)
         M = min(top_m, n)
-        for sc, w, drop_zero in ((vsc, w_vec, False), (bsc, w_bm25, True)):
+        lists = [(vsc, w_vec, False), (bsc, w_bm25, True)]
+        if ssc is not None and w_section > 0:
+            lists.append((ssc, w_section, True))
+        for sc, w, drop_zero in lists:
             if M < n:
                 top = np.argpartition(-sc, M - 1)[:M]
             else:
@@ -412,7 +460,8 @@ class Retriever:
                rcept_no=None, rcept_dt=None,
                rcept_dt_from=None, rcept_dt_to=None, top_k: int = 5, pool: int = POOL,
                top_m: int = TOP_M, per_doc: int = PER_DOC, w_vec: float = 1.0,
-               w_bm25: float = 1.0, include_superseded: bool = False,
+               w_bm25: float = 1.0, w_section: float = 0.0,
+               include_superseded: bool = False,
                **_ignored) -> dict:
         t0 = time.time()
         rtype, rtype_bad = _norm_report_type(report_type)
@@ -451,7 +500,10 @@ class Retriever:
 
         bsc = self.bm25.score(query, rows=cand)
         vsc = self._dense_scores(query, cand)
-        rrf = self._rrf(vsc, bsc, w_vec, w_bm25, top_m)
+        # w_section=0 이 기본이다. 0 이면 절 제목을 읽지도 않는다(청크 저장소 seek 없음).
+        ssc = (self._section_scores(cand, query, vsc, bsc, top_m)
+               if w_section > 0 else None)
+        rrf = self._rrf(vsc, bsc, w_vec, w_bm25, top_m, ssc=ssc, w_section=w_section)
 
         order = np.flatnonzero(rrf > 0)
         if order.size == 0:
