@@ -67,10 +67,17 @@ check("기수 환산 + 단위 + 연결기준", note ==
       repr(note))
 
 # 2. 주석은 <document> 바깥 윗줄
+#    r 은 분기보고서라 2026-09-03 부터 보고기간 경고(period_note)가 함께 붙는다.
+#    그래서 "둘째 줄이 <document>" 로 못 박지 않고, <document> 앞이 전부 주석인지 본다.
 ctx = build_context([r])
 lines = ctx.splitlines()
-check("주석이 <document> 바깥 윗줄", lines[0].startswith("※ 자동 주석")
-      and lines[1].startswith("<document id=\"1\""), repr(lines[:2]))
+doc_i = next((i for i, l in enumerate(lines) if l.startswith('<document id="1"')), -1)
+check("주석이 <document> 바깥 윗줄",
+      lines[0].startswith("※ 자동 주석") and doc_i > 0
+      and all(not l.lstrip().startswith("<") for l in lines[:doc_i]),
+      repr(lines[:doc_i + 1]))
+check("분기보고서에 보고기간 경고", "연간 확정치를 묻는 질문이면" in "\n".join(lines[:doc_i]),
+      repr([l for l in lines[:doc_i] if "연간" in l]))
 
 # 3. section_path 의 문서 제목 중복 제거
 check("section 에서 문서 제목 칸 제거",

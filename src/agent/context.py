@@ -488,6 +488,43 @@ def correction_note(res: dict):
     return head + "\n  " + tail
 
 
+# ---------------------------------------------------------------- 보고기간 경고
+
+# report_nm 앞의 '[기재정정]' '[첨부정정]' 같은 대괄호 접두를 떼어낸다
+_NM_PREFIX = re.compile(r"^\s*(?:\[[^\]]{0,20}\]\s*)+")
+# 반기·분기보고서만 경고한다. 사업보고서는 그 자체가 연간 확정치다.
+_PART_YEAR = ("반기보고서", "분기보고서")
+
+
+def period_note(res: dict):
+    """반기·분기보고서 청크 위에 붙는 경고 줄. 아니면 None (예외 없음).
+
+    【왜 필요한가 — 2026-09-03 API 실측】
+    "SK하이닉스 2024년 연결 매출액" 에 **반기보고서(2024.06)의 상반기 매출
+    12,394,044백만원**을 답했다. 연간 확정치가 아니다. 문서가 반기보고서라는 사실은
+    `source` 라벨("[SK하이닉스 반기보고서 (2024.06), …]")에 분명히 있었는데도
+    모델이 그냥 썼다 — **라벨은 출처 표기로 읽히지 경고로 읽히지 않는다.**
+
+    정정 경고(`correction_note`)에서 통했던 방법을 그대로 쓴다. 고칠 지점
+    **바로 윗줄**, `<document>` 태그 바깥에 한 줄로 적는다.
+
+    검색 결과를 거르거나 순위를 바꾸지 않는다. 안내만 붙인다 —
+    '2024년 상반기 매출' 처럼 반기 수치를 **일부러** 묻는 질문도 있기 때문이다.
+    그래서 문장을 "연간 확정치를 묻는 질문이면" 으로 조건부로 쓴다.
+    """
+    src = (res or {}).get("source") or {}
+    name = str(src.get("report_nm") or "")
+    kind = next((k for k in _PART_YEAR if _NM_PREFIX.sub("", name).startswith(k)), None)
+    if kind is None:
+        return None
+    fy = fiscal_year_of(name)
+    year = f"{fy}년" if fy > 0 else "해당 사업연도"
+    return ("※ 자동 주석(공시 원문 아님): "
+            f"{kind}다. 여기 실린 손익·현금흐름 수치는 {year} 한 해 전체가 아니라 "
+            f"보고기간까지의 값이다." + "\n"
+            f'  {year} 연간 확정치를 묻는 질문이면 report_type="annual" 로 다시 검색할 것.')
+
+
 # ---------------------------------------------------------------- 조립
 
 
@@ -513,7 +550,8 @@ def build_context(results) -> str:
         head = (f'<document id="{i}" '
                 f'source="{_attr(_source_label(src))}"\n'
                 f'          section="{_attr(_section(src))}">')
-        notes = [n for n in (correction_note(res), annotate(res)) if n]
+        notes = [n for n in (correction_note(res), period_note(res),
+                             annotate(res)) if n]
         prefix = "".join(n + "\n" for n in notes)
         blocks.append(prefix + head + "\n" + body + "\n</document>")
     return "\n\n".join(blocks)
