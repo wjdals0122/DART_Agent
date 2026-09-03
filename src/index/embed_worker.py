@@ -218,6 +218,15 @@ def main() -> int:
     from FlagEmbedding import BGEM3FlagModel
 
     torch.set_num_threads(torch_threads)
+
+    # 이 단계만은 CPU 폴백이 없다. 614,578청크 임베딩은 CPU 로 며칠이 걸려 대체가
+    # 불가능하다. 조용히 다른 장치로 흘러가느니 여기서 이유를 밝히고 멈춘다.
+    from src.eval import gpu_guard
+
+    if not gpu_guard.cuda_ok():
+        raise SystemExit(
+            "[embed_worker] CUDA 가 없다. 임베딩 단계는 CPU 로 대체할 수 없다. "
+            "GPU 가 있는 곳에서 돌리거나, 이미 만들어 둔 data/index/vectors/ 를 그대로 쓸 것")
     if args.mem_fraction:
         torch.cuda.set_per_process_memory_fraction(args.mem_fraction, 0)
         print(f"[w{rank}] GPU 메모리 상한 {args.mem_fraction:.0%}", flush=True)

@@ -53,7 +53,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--sample", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--device", default=None,
+                    help="비우면 GPU 가 있으면 cuda:0, 없으면 cpu")
     args = ap.parse_args()
     t0 = time.time()
 
@@ -94,13 +95,18 @@ def main() -> int:
     import torch
     from FlagEmbedding import BGEM3FlagModel
 
-    model = BGEM3FlagModel(MODEL_NAME, use_fp16=True, normalize_embeddings=True, devices=args.device)
+    from src.eval import gpu_guard
+
+    on_gpu = gpu_guard.cuda_ok()
+    dev = args.device or ("cuda:0" if on_gpu else "cpu")
+    model = BGEM3FlagModel(MODEL_NAME, use_fp16=on_gpu, normalize_embeddings=True,
+                           devices=dev)
     q = np.asarray(
         model.encode(texts, batch_size=32, max_length=meta.get("max_length") or 1024,
                      return_dense=True, return_sparse=False, return_colbert_vecs=False)["dense_vecs"],
         dtype=np.float32,
     )
-    dev = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    dev = torch.device(dev if torch.cuda.is_available() else "cpu")
     qt = torch.from_numpy(q).to(dev)
 
     best = torch.full((len(sample),), -1.0, device=dev)

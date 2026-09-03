@@ -2932,3 +2932,87 @@ GPU 여유 / API 키 다섯 가지를 보고 막힌 것이 있으면 **고치는
 `scripts/serve.bat` 이 서버를 띄우기 전에 이걸 먼저 통과시킨다.
 
 `--warmup` 을 붙이면 실제로 35초 올려 본다.
+
+### GPU 없는 서버에서 죽던 것 — CPU 폴백 (2026-09-03)
+
+네이버클라우드 CPU 서버(GPU 0장)에서 검색기가 이렇게 죽었다.
+
+```
+[gpu_guard] torch 가 보는 GPU 는 0장인데 인덱스 0 를 요구했다 — 0 번에 건다
+AssertionError: Torch not compiled with CUDA enabled
+```
+
+**GPU 가 0장인 것을 감지해 경고까지 찍고, 그 다음 줄에서 CUDA 를 불렀다.**
+경고는 "그래도 0번에 건다"였고 실제로 걸려다 죽었다. 감지와 행동이 따로 놀았다.
+
+#### 판단 지점을 하나로 모았다
+
+`gpu_guard.cuda_ok()` 가 유일한 판단 지점이다. 여기만 보면 된다.
+
+```
+FORCE_CPU=1        → False (개발 PC 에서 서버 환경 재현)
+torch 없음          → False
+is_available False  → False
+device_count == 0   → False
+```
+
+같은 말을 매번 찍지 않게 `_say_once()` 로 한 번만 남긴다 —
+로딩 로그가 도배되면 진짜 문제가 묻힌다.
+
+`device_str("cuda")` 가 쓰려는 장치를 실제로 쓸 수 있는 장치로 바꿔 준다.
+`Retriever.__init__` 이 이 한 줄로 CPU 에 내려앉으므로, 그 아래 코드는
+예전처럼 `self.device` 만 보고 갈라지면 된다.
+
+#### 고친 곳
+
+| 파일 | 무엇 |
+|---|---|
+| `src/eval/gpu_guard.py` | `cuda_ok` `force_cpu` `device_str` 신설. `apply_memory_fraction`·`cooldown` 은 CUDA 없으면 no-op. `read_gpus` 는 nvidia-smi 가 없으면 빈 목록(그 서버엔 nvidia-smi 자체가 없다) |
+| `src/search/hybrid.py` | 생성 시 `device_str()` 로 결정. `use_fp16` 은 GPU 유무에 따라 — CPU 에서 fp16 은 지원되지 않거나 더 느리다 |
+| `src/eval/retriever.py` | 옛 standalone 검색기도 같은 방식(배포본에 실려 나간다) |
+| `src/index/embed_worker.py` | **폴백을 넣지 않았다.** 61만 청크 임베딩은 CPU 로 대체 불가라, 조용히 흘러가느니 이유를 밝히고 멈춘다 |
+| `src/index/verify_vectors.py` · `eval/embed_health_check.py` | 장치·fp16 을 실제 환경에 맞춰 |
+| `scripts/preflight.py` | GPU 없음을 '막힘'이 아니라 '주의'로. 지연·RAM 수치를 같이 안내 |
+
+#### CPU 지연시간 — 60초 예산에 넉넉하다
+
+`FORCE_CPU=1` 로 개발 PC 에서 잰 값.
+
+| 조건 | 후보 | 1회차 | 2회차 | 3회차 |
+|---|---|---|---|---|
+| 회사+연도 (Agent 가 가장 많이 쓰는 모양) | 2,720 | 4,385ms | **136ms** | 207ms |
+| 회사만 | 10,061 | 193ms | 120ms | 121ms |
+| 문서 하나 특정 | 975 | 104ms | 101ms | 100ms |
+| 필터 없음(최악) | 517,355 | 573ms | **159ms** | 158ms |
+
+**첫 질의만 4.4초**(모델 워밍업 + 페이지 캐시), 그 뒤로는 **100~210ms** 다.
+GPU 70~80ms 의 2~3배지만 60초 예산의 0.3% 다. **검색은 병목이 아니다** —
+병목은 여전히 LLM 왕복이다.
+
+시간을 먹는 것은 행렬곱이 아니라 **질의 임베딩 81ms** 다(bge-m3 CPU 인코딩).
+BM25 는 6ms. 후보가 517,355 로 190배 늘어도 159ms 인 이유가 그것이다.
+
+#### 서버 사양 — RAM 이 관건이다
+
+```
+로드 후   2.42GB   (dense float32 2.52GB 를 RAM 에 올린다)
+검색 후   4.35GB   (임베딩 모델 + 워크스페이스)
+```
+
+**최소 RAM 8GB**를 권한다. GPU 모드는 dense 를 fp16 으로 GPU 에 올려 1.26GB 만
+쓰지만, CPU 모드는 float32 로 RAM 에 2.5GB 를 올린다.
+
+#### 검증 (LLM 0회)
+
+지시받은 명령이 그대로 돈다.
+
+```
+FORCE_CPU=1 python -c "from src.search.hybrid import Retriever; ..."
+  [gpu_guard] FORCE_CPU 가 켜져 있다 — CPU 모드로 동작
+  [load] dense -> CPU fp32
+  ok 2720
+  1위 20250311001085 사업보고서 (2024.12) | 4-2. 손익계산서   ← GPU 결과와 동일
+```
+
+도구 계층(`TOOLS["search_disclosure"]`)까지 CPU 로 통과. GPU 모드 회귀도
+5개 테스트 전부 통과 — 있는 곳에서는 예전 그대로 GPU 를 쓴다.

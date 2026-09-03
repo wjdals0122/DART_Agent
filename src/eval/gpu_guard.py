@@ -27,6 +27,51 @@ if hasattr(sys.stdout, "reconfigure"):
 # 데스크톱을 물고 있어 우리가 함부로 채우면 안 되는 GPU (memory/gpu3-is-display-gpu 참고)
 DISPLAY_GPU = 3
 
+# GPU 가 없는 곳(네이버클라우드 CPU 서버)에서도 그대로 돌아야 한다.
+# 예전엔 GPU 0장을 감지해 경고까지 찍고도 그 뒤에서 CUDA 를 불러
+# `AssertionError: Torch not compiled with CUDA enabled` 로 죽었다.
+# 이제 CUDA 호출은 전부 cuda_ok() 뒤에서만 한다.
+FORCE_CPU_ENV = "FORCE_CPU"
+_SAID: set = set()
+
+
+def _say_once(msg: str) -> None:
+    """같은 말을 매번 찍지 않는다. 로딩 로그가 이걸로 도배되면 진짜 문제가 묻힌다."""
+    if msg not in _SAID:
+        _SAID.add(msg)
+        print(f"[gpu_guard] {msg}", file=sys.stderr, flush=True)
+
+
+def force_cpu() -> bool:
+    """FORCE_CPU=1 이면 GPU 가 있어도 CPU 로 돈다. 서버 환경을 개발 PC 에서 재현할 때 쓴다."""
+    v = (os.environ.get(FORCE_CPU_ENV) or "").strip().lower()
+    return v not in ("", "0", "false", "no", "off")
+
+
+def cuda_ok() -> bool:
+    """torch 가 실제로 CUDA 를 쓸 수 있는가. 여기가 유일한 판단 지점이다."""
+    if force_cpu():
+        _say_once(f"{FORCE_CPU_ENV} 가 켜져 있다 — CPU 모드로 동작")
+        return False
+    try:
+        import torch
+    except ImportError:
+        _say_once("torch 가 없다 — CPU 모드로 동작")
+        return False
+    try:
+        ok = bool(torch.cuda.is_available()) and torch.cuda.device_count() > 0
+    except Exception as e:                     # noqa: BLE001 — 물어보다 죽으면 안 된다
+        _say_once(f"CUDA 확인 실패({type(e).__name__}: {e}) — CPU 모드로 동작")
+        return False
+    if not ok:
+        _say_once("GPU 없음 — CPU 모드로 동작")
+    return ok
+
+
+def device_str(want: str = "cuda") -> str:
+    """쓰려는 장치를 실제로 쓸 수 있는 장치로 바꿔 준다. 'cuda' 또는 'cpu'."""
+    return "cuda" if (str(want).lower().startswith("cuda") and cuda_ok()) else "cpu"
+
 QUERY = (
     "index,temperature.gpu,power.draw,power.limit,"
     "memory.used,memory.total,utilization.gpu"
@@ -35,10 +80,15 @@ QUERY = (
 
 def read_gpus() -> list[dict]:
     """nvidia-smi 한 번 찍어서 GPU별 상태를 dict 리스트로 돌려준다."""
-    out = subprocess.run(
-        ["nvidia-smi", f"--query-gpu={QUERY}", "--format=csv,noheader,nounits"],
-        capture_output=True, text=True, check=True,
-    ).stdout
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", f"--query-gpu={QUERY}", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, errors="replace", check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as e:
+        # GPU 가 없는 서버에는 nvidia-smi 자체가 없다. 빈 목록이 정답이다.
+        _say_once(f"nvidia-smi 를 쓸 수 없다({type(e).__name__}) — GPU 상태를 못 읽는다")
+        return []
     gpus = []
     for line in out.strip().splitlines():
         f = [x.strip() for x in line.split(",")]
@@ -88,10 +138,14 @@ def cooldown(gpu: int, max_temp: float, resume_temp: float, timeout: float = 900
 
     반환값은 기다린 초. 넘지 않았으면 즉시 0.0.
     """
+    if not cuda_ok():
+        return 0.0
     t0 = time.time()
     waited = False
     while True:
-        temp = next(g["temp"] for g in read_gpus() if g["index"] == gpu)
+        temp = next((g["temp"] for g in read_gpus() if g["index"] == gpu), None)
+        if temp is None:                       # 그 번호의 GPU 를 못 읽는다
+            return 0.0
         if not waited and temp < max_temp:
             return 0.0
         if waited and temp <= resume_temp:
@@ -176,7 +230,13 @@ def torch_index(physical: int) -> int:
 
 
 def apply_memory_fraction(physical: int, fraction: float | None = None) -> float:
-    """select_gpu + torch import 이후에 호출. 디스플레이 GPU면 기본으로 상한을 건다."""
+    """select_gpu + torch import 이후에 호출. 디스플레이 GPU면 기본으로 상한을 건다.
+
+    CUDA 가 없으면 **아무것도 하지 않고 0.0 을 돌려준다.** 예전엔 GPU 0장을 감지해
+    경고를 찍고도 그 아래에서 set_per_process_memory_fraction 을 불러 죽었다.
+    """
+    if not cuda_ok():
+        return 0.0
     import torch
 
     if fraction is None:

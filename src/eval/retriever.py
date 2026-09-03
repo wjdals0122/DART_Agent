@@ -67,7 +67,8 @@ class Retriever:
         verbose: bool = True,
     ) -> None:
         self.gpu = gpu
-        self.device = device
+        # GPU 가 없거나 FORCE_CPU=1 이면 CPU 로 내려앉는다 (gpu_guard 가 유일한 판단 지점)
+        self.device = gpu_guard.device_str(device)
         self.use_sparse = use_sparse
         # True면 정정 재제출로 밀려난 옛 정기보고서를 후보에서 뺀다.
         # 실험 중 ret.latest_only = True/False로 바로 바꿔 비교할 수 있다.
@@ -143,11 +144,12 @@ class Retriever:
         gpu_guard.cooldown(self.gpu, self.max_temp, self.resume_temp)
         from FlagEmbedding import BGEM3FlagModel
 
+        on_gpu = self.device == "cuda"
         self.model = BGEM3FlagModel(
             paths.MODEL_NAME,
-            use_fp16=True,
+            use_fp16=on_gpu,          # CPU 에서 fp16 은 지원되지 않거나 더 느리다
             normalize_embeddings=True,
-            devices="cuda:0" if self.device == "cuda" else "cpu",
+            devices="cuda:0" if on_gpu else "cpu",
         )
         self._log(f"[load] {paths.MODEL_NAME} ({time.time() - t:.1f}초)")
 

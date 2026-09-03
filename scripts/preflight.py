@@ -99,6 +99,14 @@ def check_index_files() -> None:
 
 
 def check_gpu() -> None:
+    # GPU 가 없어도 돈다(CPU 폴백). 없는 것은 '막힘'이 아니라 '주의'다.
+    from src.eval import gpu_guard
+
+    if not gpu_guard.cuda_ok():
+        warn("GPU 없음 — CPU 모드로 동작",
+             "검색 1회 100~210ms(GPU 70~80ms) · RAM 약 4.4GB 필요 "
+             "(dense 2.5GB + 임베딩 모델). 60초 예산에는 넉넉하다")
+        return
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=index,memory.used,memory.total",

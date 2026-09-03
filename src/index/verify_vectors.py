@@ -108,7 +108,11 @@ def main() -> int:
     texts = pq.read_table(paths.EMBED_TEXTS, columns=["embed_text"]).column("embed_text").to_pylist()
     from FlagEmbedding import BGEM3FlagModel
 
-    model = BGEM3FlagModel(paths.MODEL_NAME, use_fp16=True, normalize_embeddings=True, devices="cuda:0")
+    from src.eval import gpu_guard
+
+    on_gpu = gpu_guard.cuda_ok()
+    model = BGEM3FlagModel(paths.MODEL_NAME, use_fp16=on_gpu, normalize_embeddings=True,
+                           devices="cuda:0" if on_gpu else "cpu")
     out = model.encode(
         [texts[i] for i in sample],
         batch_size=len(sample),

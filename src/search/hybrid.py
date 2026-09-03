@@ -203,6 +203,11 @@ def _norm_report_type(v):
 
 class Retriever:
     def __init__(self, device: str = "cuda", gpu: int = 0, verbose: bool = True) -> None:
+        # GPU 가 없거나 FORCE_CPU=1 이면 여기서 한 번에 CPU 로 내려앉는다.
+        # 아래 코드는 self.device 만 보고 갈라지므로 판단은 이 한 줄이면 된다.
+        from src.eval import gpu_guard
+
+        device = gpu_guard.device_str(device)
         # 한 프로세스에서 두 번 만들면 dense 와 임베딩 모델이 통째로 두 벌 올라간다
         # (실측: GPU 1.26GB → 2.52GB, 모델 로드 2회). 서버는 get_searcher() 만 써야 한다.
         # _INSTANCE 가 아니라 만든 횟수를 센다 — 직접 만든 뒤 get_searcher() 를 부르는
@@ -318,9 +323,11 @@ class Retriever:
 
         from FlagEmbedding import BGEM3FlagModel
 
+        # CPU 에서 fp16 은 지원되지 않거나 오히려 느리다. 장치에 맞춰 정한다.
+        on_gpu = self.device == "cuda"
         self.model = BGEM3FlagModel(
-            paths.MODEL_NAME, use_fp16=True, normalize_embeddings=True,
-            devices="cuda:0" if self.device == "cuda" else "cpu")
+            paths.MODEL_NAME, use_fp16=on_gpu, normalize_embeddings=True,
+            devices="cuda:0" if on_gpu else "cpu")
         self._log(f"[load] {paths.MODEL_NAME} ({time.time() - t:.1f}초)")
 
     # ---------------------------------------------------------------- 1. 하드필터
