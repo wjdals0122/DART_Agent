@@ -501,6 +501,16 @@ class Retriever:
         bsc = self.bm25.score(query, rows=cand)
         vsc = self._dense_scores(query, cand)
         # w_section=0 이 기본이다. 0 이면 절 제목을 읽지도 않는다(청크 저장소 seek 없음).
+        #
+        # 【미채택 — 2026-09-03 측정. 기본 0 을 유지한다. 지우지 말 것】
+        # 골든셋 18문항 recall@5: 0.0=0.361 · 0.3=0.306 · 0.5=0.361 · 1.0=0.278.
+        # 어느 값도 0 을 넘지 못했다. 0.3 에서 recall@20 만 0.722→0.778 로 오르는데
+        # recall@5 는 떨어진다 — 위쪽 순위를 흔들면서 아래만 채운 것이라 쓸모가 없다.
+        # 기대와 달리 **짧은 질의(2어절)에서 더 나빴다**(recall@20 0.500→0.333).
+        # 절 제목은 재무제표 절에서 문서마다 거의 같은 문자열이라 변별력이 아니라
+        # 잡음으로 들어간다. 표본이 18·3문항이라 "확실히 나쁘다" 까지는 못 말하고
+        # **"좋아진다는 근거가 없다"** 까지만 말할 수 있다.
+        # 재측정: python eval/sweep_section.py · 표: reports/sweep_section.md
         ssc = (self._section_scores(cand, query, vsc, bsc, top_m)
                if w_section > 0 else None)
         rrf = self._rrf(vsc, bsc, w_vec, w_bm25, top_m, ssc=ssc, w_section=w_section)

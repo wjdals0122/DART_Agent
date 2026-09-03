@@ -64,6 +64,25 @@ def has_num(text: str, num: str) -> bool:
     return num in text or num.replace(",", "") in (text or "").replace(",", "")
 
 
+# 답변 끝의 '근거' 절 본문만 떼어낸다(loop._GEUN 과 같은 모양).
+_GEUN_SEC = re.compile(r"\n[ \t]*(?:\*\*)?근거(?:\*\*)?[ \t]*:?[ \t]*\n(.*)$", re.S)
+# 조회 범위로 인정하는 표현. 접수번호가 있으면 그것이 곧 조회한 문서다.
+_SCOPE = ("0건", "없음", "해당 조건", "조회")
+
+
+def scope_in_geun(text: str) -> bool:
+    """근거 절에 '무엇을 조회했는지' 가 적혀 있는가.
+
+    접수번호 14자리가 있으면 조회한 문서가 적힌 것이다. 아무것도 못 찾은 경우에는
+    "해당 조건의 공시 0건" 같은 문장이 있어야 한다.
+    """
+    m = _GEUN_SEC.search(text or "")
+    if not m:
+        return False
+    body = m.group(1)
+    return bool(_RCEPT.search(body)) or any(w in body for w in _SCOPE)
+
+
 # ---------------------------------------------------------------- 문항
 #
 # `check(answer, row) -> (bool, 실패사유)`. 정답이 사람 손으로 확정된 것만 넣는다.
@@ -94,16 +113,38 @@ def c4(a, r):
 
 
 def c5(a, r):
+    """두 값 + 배수. 도구 횟수는 보지 않는다.
+
+    기준선에서는 "도구 3회 이상" 을 봤는데, 실제로는 2회(회사별 검색 1회씩)로
+    두 값을 정확히 가져왔다. 기대치가 과했던 것이라 뺐다. 대신 **비교 결과**를 본다 —
+    차액 234,677,943백만원을 "234.73% 더 많다" 로 쓴 오류가 실제로 났다. 4.55배가 맞다.
+    """
     miss = [n for n in ("300,870,903", "66,192,960") if not has_num(a, n)]
     if miss:
         return False, f"{'·'.join(miss)} 없음"
-    if r["n_tool_calls"] < 3:
-        return False, f"도구 {r['n_tool_calls']}회 — 3회 미만"
+    if not (has_num(a, "4.55") or has_num(a, "4.5")):
+        return False, "배수 4.5/4.55 가 없다 — 비교 결과가 틀렸을 수 있다"
     return True, ""
 
 
 def c6(a, r):
-    return any(w in a for w in _REFUSE), "거절/부존재 표현 없음"
+    """거절하되, 조회는 하고 거절해야 한다."""
+    if not any(w in a for w in _REFUSE):
+        return False, "거절/부존재 표현 없음"
+    if r["n_tool_calls"] < 1:
+        return False, "도구 0회 — 조회하지 않고 거절했다"
+    if not scope_in_geun(a):
+        return False, "근거 절에 조회 범위가 없다"
+    return True, ""
+
+
+def c7(a, r):
+    """정정공시의 확정치를 답했는가. 정정 전 값이 섞이면 실패."""
+    if not has_num(a, "644"):
+        return False, "644 없음"
+    if has_num(a, "583"):
+        return False, "583(정정 전 값)이 섞였다"
+    return True, ""
 
 
 CASES = [
@@ -121,10 +162,14 @@ CASES = [
      "want": "7,730,313 + 적자 표현", "check": c4},
     {"n": 5, "name": "삼성전자·SK하이닉스 2024 매출 비교", "quick": True,
      "q": "삼성전자와 SK하이닉스의 2024년 연결 매출액을 비교해줘.",
-     "want": "두 값 모두 + 도구 3회 이상", "check": c5},
+     "want": "두 값 모두 + 배수 4.5/4.55", "check": c5},
     {"n": 6, "name": "삼성전자 이사회 반대 이사", "quick": False,
      "q": "삼성전자 이사회에서 반대한 이사가 있었나?",
-     "want": "확인되지 않음 계열", "check": c6},
+     "want": "확인되지 않음 계열 + 도구 1회 이상 + 근거 절에 조회 범위", "check": c6},
+    {"n": 7, "name": "HD현대일렉트릭 고압차단기 계약 확정금액", "quick": False,
+     "q": "HD현대일렉트릭이 2024년 1월 30일 체결한 고압차단기 공급계약의 "
+          "최종 계약금액은?",
+     "want": "644 포함 · 583 불포함", "check": c7},
 ]
 
 

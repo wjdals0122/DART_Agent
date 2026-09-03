@@ -119,6 +119,87 @@ REVIEW = (
     "붙이지 마라. 검토했다는 사실 자체를 언급하지 마라."
 )
 
+# ---------------------------------------------------------------- 최종 답변 검문
+#
+# 【왜 코드인가】
+# 이 리포의 반복된 교훈이다 — 근거 절을 프롬프트로 세 번 시도해 세 번 실패하고
+# 후처리로 해결했다. 아래 둘도 프롬프트(system.txt [계산]·[확인되지 않음])에 같이
+# 적어 두었지만, **지켜지는지는 코드가 확인한다.**
+#
+# 【왜 tool 메시지가 아니라 user 메시지인가 — 지시와 다른 점】
+# 지시는 "tool 메시지로 넣으라" 였다. 그렇게 하지 않았다. HCX 의 tool 역할 메시지는
+# **바로 앞 assistant 메시지의 toolCalls 에 있는 toolCallId 를 가리켜야** 한다.
+# 여기는 모델이 도구를 부르지 **않은** 턴이라 가리킬 id 가 없다. 없는 id 로 tool
+# 메시지를 만들면 HTTP 400 이 나고, 평가 중 400 은 그 문항을 통째로 잃는다.
+# 그래서 이미 검증된 세 개(FORCE_TOOL·REVIEW·LIST_ONLY_NUDGE)와 **같은 방식**으로
+# assistant(답변) + user(지시) 를 넣는다. 모델에게 보이는 내용은 지시 그대로다.
+#
+# 검문은 **문항당 최대 한 번**이다. 추가 턴에서도 같은 상태면 그대로 내보낸다.
+AUDIT_MARGIN = 8.0          # 남은 시간이 이보다 적으면 검문을 건너뛴다
+
+AUDIT_CALC = (
+    "답변에 비율·배수 표현이 있으나 calculate 를 사용하지 않았다. "
+    "calculate 로 값을 구한 뒤 답변을 다시 작성하라."
+)
+AUDIT_NO_SEARCH = (
+    "아직 어떤 공시도 조회하지 않았다. search_disclosure 또는 "
+    "list_disclosures 로 먼저 확인한 뒤 답하라."
+)
+
+# '4.55배' '234.73%' '3.06 퍼센트' 처럼 **숫자에 붙은** 비율·배수 표기만 잡는다.
+# 그냥 '배' 를 찾으면 배당·배출·배터리·분배가 전부 걸린다.
+_RATIO = re.compile(r"\d[\d,]*(?:\.\d+)?\s*(?:%|퍼센트|배)")
+_DELTA = ("증가", "감소")
+_ONLY_NUM = re.compile(r"[^\d,.]")
+# 검문 2 의 거절 표현. _REFUSAL 보다 좁게 — 지시가 이 둘을 지목했다.
+_AUDIT_REFUSE = ("확인되지 않", "확인할 수 없")
+
+
+def needs_calc(text: str, tool_calls: list, documents: list) -> bool:
+    """비율·배수를 말하면서 calculate 를 안 불렀나. 예외를 던지지 않는다.
+
+    【왜 '문서에 없는 숫자' 만 보는가 — 지시를 좁힌 부분】
+    지시는 "배·%·증가·감소가 있으면" 이었다. 그대로 하면 공시에서 **그대로 베낀**
+    비율(예: '매출액대비 3.06%')에도 걸려 거의 모든 답변이 검문에 걸린다.
+    한 문항에 LLM 호출이 하나씩 더 붙고 시간도 는다.
+
+    검문의 이름이 '계산 미검증' 이다. 계산을 했는지 여부는 **그 숫자가 검색된
+    문서에 그대로 있는가**로 갈린다. 문서에 있으면 인용이고, 없으면 만들어 낸 값이다.
+    실제 사례가 정확히 그랬다 — '234.73%' 는 어느 문서에도 없었다(차액을 비율로 썼다).
+    """
+    try:
+        if any((c or {}).get("name") == "calculate" for c in (tool_calls or [])):
+            return False
+        body = "\n".join(str((d or {}).get("text") or "") for d in (documents or []))
+        flat = body.replace(",", "")
+        for sent in _SENT.findall(text or ""):
+            toks = _RATIO.findall(sent)
+            if not toks and any(w in sent for w in _DELTA):
+                toks = [m.group(0) for m in _NUM3.finditer(sent)]
+            for t in toks:
+                num = _ONLY_NUM.sub("", t).strip(".,")
+                if not num:
+                    continue
+                if num in body or num.replace(",", "") in flat:
+                    continue                   # 문서에서 베낀 값 — 계산이 아니다
+                return True
+        return False
+    except Exception:                          # noqa: BLE001 — 검문이 답을 막으면 안 된다
+        traceback.print_exc(file=sys.stderr)
+        return False
+
+
+def refused_without_search(text: str, tool_calls: list) -> bool:
+    """아무것도 조회하지 않고 '확인되지 않는다' 고 했나."""
+    try:
+        if tool_calls:
+            return False
+        return any(w in (text or "") for w in _AUDIT_REFUSE)
+    except Exception:                          # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        return False
+
+
 # 답변 끝의 '근거' 목록을 찾아내는 규칙. 줄 머리가 '근거' 이고 그 아래가
 # '-' 나 '*' 로 시작하는 목록인 구간만 잡는다. 산문형 '근거: …' 는 건드리지 않는다.
 _GEUN = re.compile(r"\n[ \t]*(?:\*\*)?근거(?:\*\*)?[ \t]*:?[ \t]*\n"
@@ -337,7 +418,9 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
                      "hit_call_limit": False, "http_retry": 0, "retry_429": 0,
                      "retry_wait_s": 0.0, "resent_prompt_tokens_est": 0,
                      "no_tool_nudge": False, "list_only_nudge": False,
-                     "answered_without_tools": False},
+                     "answered_without_tools": False,
+                     # 최종 답변 검문이 걸렸으면 "calc" 또는 "no_search"
+                     "audit": ""},
            "stopped_by_budget": False, "unsourced_claim": False,
            # 검색이 올린 청크 원문. 평가 서버가 retrieved_context 로 그대로 내보낸다.
            # sources 는 출처 문자열뿐이라 본문이 없다.
@@ -446,6 +529,7 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
     reviewed = False           # 도구 없이 답하는 경로의 검토도 딱 한 번만
     nudged = False             # 조회 없이 답하려는 것을 되돌리는 지시도 한 번만
     list_only_nudged = False   # 목록만 보고 본문에 답하려는 경로도 한 번만
+    audited = False            # 최종 답변 검문도 문항당 한 번만 — 무한 루프 금지
     bad_tools: set = set()     # 직전 턴에 error/not_found 를 돌려준 도구 이름
 
     while True:
@@ -501,6 +585,22 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
                     msgs.append({"role": "assistant", "content": text})
                     msgs.append({"role": "user", "content": LIST_ONLY_NUDGE})
                     continue
+            # 최종 답변 검문 — 문항당 한 번. 남은 시간이 8초 미만이면 건너뛴다.
+            # 검문 순서는 계산 → 검색 없는 거절. 둘 다 걸려도 한 번만 되돌린다.
+            if extra is not None and not audited and \
+                    (deadline - (time.time() - t0)) >= AUDIT_MARGIN:
+                kind, note = None, None
+                if needs_calc(text, out["tool_calls"], out["documents"]):
+                    kind, note = "calc", AUDIT_CALC
+                elif refused_without_search(text, out["tool_calls"]):
+                    kind, note = "no_search", AUDIT_NO_SEARCH
+                if kind:
+                    audited = True
+                    out["waste"]["audit"] = kind
+                    msgs.append({"role": "assistant", "content": text})
+                    msgs.append({"role": "user", "content": note})
+                    continue
+
             out["answer"] = text
             if not out["tool_calls"]:
                 out["waste"]["answered_without_tools"] = True

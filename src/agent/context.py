@@ -525,6 +525,38 @@ def period_note(res: dict):
             f'  {year} 연간 확정치를 묻는 질문이면 report_type="annual" 로 다시 검색할 것.')
 
 
+# ---------------------------------------------------------------- 진행상황 표 경고
+
+# 「XI. 그 밖에 … > 공시내용 진행 및 변경사항」 절을 알아보는 조건.
+# 절 이름의 띄어쓰기·번호·조사가 회사마다 다르므로 공백을 지우고 세 조각을 모두 본다.
+_PROGRESS_PARTS = ("공시내용", "진행", "변경")
+
+
+def progress_note(res: dict):
+    """정기보고서의 '공시내용 진행 및 변경사항' 청크 위에 붙는 경고 줄. 아니면 None.
+
+    【왜 필요한가 — 2026-09-03 조사, docs/WORKLOG.md step8-C】
+    HD현대일렉트릭 사업보고서(2024.12, 접수 2025-03-20)의 이 표에
+    계약금액총액 **583억원**, 계약기간 **'24.1.30 ~ '26.1.30** 이 실려 있었다.
+    그 계약은 2025-02-25 정정공시로 **644억원 / 2026-08-31** 로 바뀐 뒤였다.
+    **정정보다 뒤에 접수된 보고서인데도 표가 갱신되지 않았다.** 원문끼리 어긋난 것이다.
+
+    그 표에는 '정정 전' · '정정 후' 열이 **없다**. 값이 하나뿐이고 그게 옛것이다.
+    그래서 "정정 후 열을 써라" 같은 규칙으로는 못 고친다. 표 바로 위에서
+    **이 표가 요약이라는 사실과, 확정치를 어디서 봐야 하는지**를 알려 준다.
+
+    period_note 와 같은 방식이다 — 검색 결과를 거르거나 순위를 바꾸지 않는다.
+    """
+    src = (res or {}).get("source") or {}
+    flat = _WS.sub("", str(src.get("section") or ""))
+    if not flat or not all(p in flat for p in _PROGRESS_PARTS):
+        return None
+    return ("※ 자동 주석(공시 원문 아님): 이 표는 요약이며 개별 계약의 최신 확정치가 "
+            "아닐 수 있다." + "\n"
+            "  계약금액·계약기간은 해당 거래소공시(단일판매ㆍ공급계약 체결/정정)에서 "
+            "확인하라.")
+
+
 # ---------------------------------------------------------------- 조립
 
 
@@ -551,7 +583,7 @@ def build_context(results) -> str:
                 f'source="{_attr(_source_label(src))}"\n'
                 f'          section="{_attr(_section(src))}">')
         notes = [n for n in (correction_note(res), period_note(res),
-                             annotate(res)) if n]
+                             progress_note(res), annotate(res)) if n]
         prefix = "".join(n + "\n" for n in notes)
         blocks.append(prefix + head + "\n" + body + "\n</document>")
     return "\n\n".join(blocks)
