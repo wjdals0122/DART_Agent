@@ -1,0 +1,159 @@
+"""근거 절 선별 + 상투구 제거 검증. **LLM 을 부르지 않는다.**
+
+  python eval/test_sources.py
+
+【왜】 회귀 6번에서 두 가지가 한꺼번에 드러났다.
+  - '삼성전자 이사회에서 반대한 이사가 있었나' 에 **자기주식취득결정 5건**이 근거로
+    달렸다. 답변 본문은 그 문서들을 한 번도 가리키지 않았다. 후처리가
+    "하나도 안 맞으면 전부 붙인다" 였기 때문이다
+  - "관련 기관에 문의하시기 바랍니다" 가 그대로 남았다. REVIEW 는 코드 필터가
+    아니라 모델에게 보내는 지시문일 뿐이라 지켜지지 않았다
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+for _s in (sys.stdout, sys.stderr):
+    if hasattr(_s, "reconfigure"):
+        _s.reconfigure(encoding="utf-8", errors="replace")
+
+from src.agent.loop import (attach_sources, scope_line,  # noqa: E402
+                            strip_boilerplate, used_sources)
+
+FAIL = []
+S_SAM = "[삼성전자 사업보고서 (2024.12), 2025-03-11, 접수번호 20250311001085]"
+S_HYN = "[SK하이닉스 사업보고서 (2024.12), 2025-03-19, 접수번호 20250319000665]"
+S_TREA = "[삼성전자 주요사항보고서(자기주식취득결정), 2025-02-18, 접수번호 20250218000019]"
+
+
+def check(name, cond, detail=""):
+    print(f"  [{'PASS' if cond else 'FAIL'}] {name}" + (f" — {detail}" if detail else ""))
+    if not cond:
+        FAIL.append(name)
+
+
+print("=" * 74)
+print("1 — 본문이 가리킨 출처만 고른다")
+print("=" * 74)
+
+body = ("2024년 연결 매출액은 300,870,903백만원이다 "
+        "[삼성전자 사업보고서 (2024.12), 2025-03-11, 접수번호 20250311001085].")
+check("접수번호로 인용", used_sources(body, [S_SAM, S_HYN]) == [S_SAM])
+
+check("라벨 통째로 인용", used_sources(f"근거는 {S_HYN} 이다.", [S_SAM, S_HYN]) == [S_HYN])
+check("회사명+보고서명만 적어도 인용",
+      used_sources("삼성전자 사업보고서에 따르면 매출은 300조다.", [S_SAM, S_HYN]) == [S_SAM])
+check("둘 다 인용하면 둘 다",
+      used_sources(f"{S_SAM} 와 {S_HYN}", [S_SAM, S_HYN]) == [S_SAM, S_HYN])
+
+refuse = ("삼성전자 이사회에서 반대한 이사가 있었는지는 공시에서 확인되지 않습니다.")
+check("본문이 안 가리키면 빈 리스트 — 회귀 6번 재현",
+      used_sources(refuse, [S_TREA] * 1 + [S_TREA]) == [],
+      repr(used_sources(refuse, [S_TREA])))
+check("옛 규칙(전부 붙이기)이 사라졌다", used_sources("무관한 문장.", [S_SAM, S_HYN]) == [])
+
+print()
+print("=" * 74)
+print("2 — 근거 절이 비면 조회 범위를 적는다")
+print("=" * 74)
+
+out, used = attach_sources(refuse, [S_TREA, S_TREA.replace("0019", "0020")])
+check("출처는 하나도 안 붙는다", used == [], str(used))
+check("근거 절은 그래도 있다", "\n근거\n" in out, repr(out[-90:]))
+check("조회 범위를 적는다", "조회: 삼성전자" in out, repr(out.splitlines()[-1]))
+check("거절이면 '해당 기재 없음'", "해당 기재 없음" in out, repr(out.splitlines()[-1]))
+check("본문은 그대로", refuse.split("는")[0] in out)
+
+line = scope_line([S_SAM, S_HYN], "매출액은 300조다.")
+check("여러 회사를 나열한다", "삼성전자·SK하이닉스" in line, line)
+check("정기공시로 종류를 밝힌다", "정기공시 2건" in line, line)
+check("거절이 아니면 다른 꼬리말", "답변에 인용된 문서 없음" in line, line)
+
+out2, used2 = attach_sources(body, [S_SAM, S_HYN])
+check("인용한 것만 근거 절에", used2 == [S_SAM], str(used2))
+check("안 쓴 출처는 빠진다", "20250319000665" not in out2.split("근거")[-1])
+
+# 모델은 출처를 본문 중간이 아니라 **자기가 쓴 근거 절에** 적는 일이 많다.
+# 그 절을 먼저 떼고 판정하면 맞는 답에서도 근거가 통째로 사라진다(실측 4/7).
+model_out = ("삼성전자의 2024년 연결 매출액은 300,870,903백만원입니다.\n\n"
+             f"근거\n- {S_SAM}\n")
+out3, used3 = attach_sources(model_out, [S_SAM, S_HYN])
+check("모델이 자기 근거 절에만 적어도 인용으로 본다", used3 == [S_SAM], str(used3))
+check("그 경우 조회 범위로 바뀌지 않는다", "조회:" not in out3, repr(out3[-80:]))
+
+print()
+print("=" * 74)
+print("3 — 상투구는 지우고 정상 문장은 남긴다")
+print("=" * 74)
+
+# 지워야 할 4종
+GO = [("관련 기관에 문의", "추가 정보가 필요하시면 관련 기관에 문의하시기 바랍니다."),
+      ("전문가와 상담", "구체적인 판단은 전문가와 상담하십시오."),
+      ("확인하시기 바랍니다", "자세한 내용은 공시 원문을 확인하시기 바랍니다."),
+      ("참고하시기 바랍니다", "이 점 참고하시기 바랍니다.")]
+for name, sent in GO:
+    got = strip_boilerplate("2024년 매출은 300조다. " + sent)
+    check(f"지운다 — {name}", sent not in got and "300조" in got, repr(got))
+
+# 남겨야 할 2종
+STAY = [("수치 문장", "2024년 연결 매출액은 300,870,903백만원입니다."),
+        ("거절 문장", "삼성전자 이사회 표결 내역은 공시에서 확인되지 않습니다.")]
+for name, sent in STAY:
+    got = strip_boilerplate(sent)
+    check(f"남긴다 — {name}", got.strip() == sent, repr(got))
+
+print()
+print("=" * 74)
+print("4 — 문장만 지우고 문단을 지우지 않는다")
+print("=" * 74)
+
+para = ("첫 문단 첫 문장이다. 관련 기관에 문의하시기 바랍니다. 첫 문단 셋째 문장이다."
+        "\n\n둘째 문단이다.")
+got = strip_boilerplate(para)
+check("걸린 문장만 사라진다", "관련 기관에 문의" not in got, repr(got))
+check("같은 문단의 다른 문장은 남는다",
+      "첫 문단 첫 문장이다." in got and "첫 문단 셋째 문장이다." in got, repr(got))
+check("둘째 문단은 그대로", "둘째 문단이다." in got, repr(got))
+check("문단 구분이 살아 있다", "\n\n" in got, repr(got))
+
+check("전부 상투구면 원문을 돌려준다(빈 답 금지)",
+      strip_boilerplate("관련 기관에 문의하시기 바랍니다.").strip() != "")
+for bad in (None, "", "  "):
+    try:
+        strip_boilerplate(bad)
+        ok = True
+    except Exception:                          # noqa: BLE001
+        ok = False
+    check(f"strip_boilerplate({bad!r}) 예외 없음", ok)
+
+print()
+print("=" * 74)
+print("5 — 회귀 6번 답변 전체를 그대로 통과시켜 본다")
+print("=" * 74)
+
+REAL = ("삼성전자 이사회에서 반대한 이사가 있었는지에 대한 정보는 제공된 공시에서 "
+        "확인되지 않습니다. 이사회 발언·표결 내역은 공시 대상이 아니므로 이와 관련된 "
+        "내용을 공시에서 찾아볼 수 없습니다. 추가적인 정보가 필요하시면 관련 기관에 "
+        "문의하시기 바랍니다.")
+srcs = [S_TREA, S_TREA.replace("0019", "0020"), S_TREA.replace("0019", "0021")]
+fixed, used3 = attach_sources(strip_boilerplate(REAL), srcs)
+check("상투구가 사라졌다", "관련 기관에 문의" not in fixed, repr(fixed[:160]))
+check("거절 문장은 남았다", "확인되지 않습니다" in fixed)
+check("자기주식 문서가 근거에서 빠졌다", "20250218000019" not in fixed, repr(fixed))
+check("조회 범위가 대신 적혔다", "조회: 삼성전자 주요사항보고서 3건" in fixed,
+      repr(fixed.splitlines()[-1]))
+print()
+print("  --- 고친 뒤 답변 ---")
+for ln in fixed.splitlines():
+    print("   ", ln)
+
+print()
+print("=" * 74)
+if FAIL:
+    print(f"{len(FAIL)}건 실패: " + ", ".join(FAIL))
+    sys.exit(1)
+print("전부 통과 · LLM 실제 호출 0회")

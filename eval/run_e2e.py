@@ -55,6 +55,7 @@ import json
 import re
 import sys
 import time
+import traceback
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -491,8 +492,17 @@ def run(items: list, out_path: Path, budget, sleep: float, model, deadline: floa
 
         U.set_context(script=SCRIPT, qid=it["qid"])
         t0 = time.time()
-        res = answer(it["question"], model=model, deadline=deadline,
-                     max_tool_calls=max_tool_calls, qid=it["qid"])
+        err = ""
+        try:
+            res = answer(it["question"], model=model, deadline=deadline,
+                         max_tool_calls=max_tool_calls, qid=it["qid"])
+        except BaseException as e:             # noqa: BLE001 — 한 문항에 전체가 멈추면 안 된다
+            # answer() 는 내부에서 다 잡지만, 그 바깥(임포트·메모리 등)에서 터질 수 있다.
+            # 그 문항만 error 로 남기고 다음으로 간다. 죽으면 --resume 이 여기서 이어간다.
+            traceback.print_exc()
+            err = f"{type(e).__name__}: {e}"
+            res = {"answer": "", "sources": [], "tool_calls": [], "usage": {},
+                   "waste": {}, "note": f"문항 실패: {err}", "documents": []}
         row = {
             "qid": it["qid"], "corp": it["corp"], "qtype": it["qtype"],
             "question": it["question"], "question_raw": it.get("question_raw", ""),
@@ -514,6 +524,9 @@ def run(items: list, out_path: Path, budget, sleep: float, model, deadline: floa
             "unsourced_claim": bool(res.get("unsourced_claim")),
             "note": res.get("note") or "",
             "elapsed": round(time.time() - t0, 2),
+            # 문항별 비용. usage.est_won 과 같은 값이지만 표를 만들 때 바로 쓴다
+            "cost": (res.get("usage") or {}).get("est_won"),
+            "error": err,           # 문항이 통째로 실패했을 때만 채워진다
             "verdict": None,        # 사람이 채운다 — 자동 채점은 폐기했다
         }
         rows.append(row)
@@ -526,7 +539,15 @@ def run(items: list, out_path: Path, budget, sleep: float, model, deadline: floa
               f"입력 {u.get('prompt', 0):,}/출력 {u.get('completion', 0):,} · "
               f"{U.fmt_won(u.get('est_won'))} · "
               f"{row['elapsed']:.0f}초 · 누적 {U.fmt_won(budget.spent_won)}"
-              + ("  ← 상한으로 중단됨" if row["stopped_by_budget"] else ""))
+              + ("  ← 상한으로 중단됨" if row["stopped_by_budget"] else "")
+              + (f"  ← 실패 {err}" if err else ""))
+
+        # 10문항마다 진행 상황과 누적 비용을 한 줄로. 긴 실행에서 이것만 봐도 된다.
+        if i % 10 == 0 or i == len(items):
+            n_err = sum(1 for r in rows if r.get("error"))
+            sec = sum(r["elapsed"] for r in rows)
+            print(f"  ── 진행 {i}/{len(items)} · 누적 {U.fmt_won(budget.spent_won)} · "
+                  f"소요 {sec / 60:.1f}분 · 실패 {n_err}건", flush=True)
 
         if row["stopped_by_budget"]:
             print(f"\n[중단] 비용 상한 초과 — {budget.line()}")

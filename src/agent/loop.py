@@ -355,15 +355,121 @@ def strip_sources_section(text: str) -> str:
     return out
 
 
-def used_sources(text: str, sources: list) -> list:
-    """답변이 실제로 인용한 출처만 고른다.
+_WS_ANY = re.compile(r"\s+")
 
-    접수번호(14자리)가 답변 본문에 있으면 '썼다' 로 본다. 하나도 안 맞으면
-    판단을 포기하고 전부 붙인다 — 근거가 없는 것보다 많은 게 낫다.
+
+def _flat(s: str) -> str:
+    return _WS_ANY.sub("", s or "")
+
+
+def used_sources(text: str, sources: list) -> list:
+    """답변 본문이 **실제로 가리킨** 출처만 고른다. 아니면 빈 리스트.
+
+    【2026-09-03 변경 — 예전에는 하나도 안 맞으면 전부 붙였다】
+    옛 규칙은 `return used or list(sources)` 였다. "근거가 없는 것보다 많은 게 낫다"
+    였는데, 회귀 6번에서 대가를 치렀다 — '삼성전자 이사회에서 반대한 이사가 있었나'
+    라는 질문에 **자기주식취득결정 5건**이 근거로 달렸다. 답변은 "확인되지 않습니다"
+    였고 본문은 그 문서들을 한 번도 가리키지 않았다. 검색이 엉뚱한 것을 물어 왔고,
+    후처리가 그걸 그대로 근거로 승격시킨 것이다.
+
+    【무엇을 '가리켰다' 로 보는가 — 세 가지】
+    접수번호만 보면 너무 좁다. 모델은 접수번호 없이 문서 이름만 적기도 한다.
+      1. 출처의 접수번호 14자리가 본문에 있다
+      2. 출처 라벨 문자열이 통째로 본문에 있다 (공백 무시)
+      3. 회사명과 보고서명이 **둘 다** 본문에 있다 (공백 무시)
+    셋 중 하나면 인용으로 본다. 하나도 아니면 그 출처는 답변과 무관하다.
     """
-    seen = _RCEPT.findall(text or "")
-    used = [s for s in sources if any(n in s for n in seen)]
-    return used or list(sources)
+    body = text or ""
+    flat = _flat(body)
+    nums = set(_RCEPT.findall(body))
+    out = []
+    for s in sources:
+        m = _RCEPT.search(s or "")
+        if m and m.group(0) in nums:
+            out.append(s)
+            continue
+        if _flat(s) and _flat(s) in flat:
+            out.append(s)
+            continue
+        corp, rep = _corp_report(s)
+        if corp and rep and _flat(corp) in flat and _flat(rep) in flat:
+            out.append(s)
+    return out
+
+
+def _corp_report(source: str) -> tuple:
+    """'[삼성전자 사업보고서 (2024.12), 2025-03-11, 접수번호 …]' -> ('삼성전자', '사업보고서')."""
+    head = (source or "").strip().lstrip("[").split(",")[0].strip()
+    corp, _, rest = head.partition(" ")
+    rep = rest.split("(")[0].strip()
+    return corp, rep
+
+
+# 조회 범위 줄에 쓸 공시 종류. report_nm 에서 바로 읽는다 — 지어내지 않는다.
+_KIND = (("사업보고서", "정기공시"), ("반기보고서", "정기공시"), ("분기보고서", "정기공시"),
+         ("주요사항보고서", "주요사항보고서"), ("대량보유", "지분공시"))
+
+
+def scope_line(sources: list, body: str) -> str:
+    """근거 절이 비었을 때 대신 적는 '무엇을 조회했는가' 한 줄.
+
+    비워 두면 "찾아보지도 않았다" 와 구분되지 않는다. 조회는 했으나 답변이 그 문서를
+    쓰지 않았다는 사실 자체가 평가자에게 필요한 정보다.
+    """
+    corps, kinds = [], set()
+    for s in sources:
+        corp, rep = _corp_report(s)
+        if corp and corp not in corps:
+            corps.append(corp)
+        kinds.add(next((v for k, v in _KIND if k in rep), "공시"))
+    kind = kinds.pop() if len(kinds) == 1 else "공시"
+    who = "·".join(corps) if corps else "코퍼스"
+    tail = ("해당 기재 없음" if any(w in (body or "") for w in _REFUSAL)
+            else "답변에 인용된 문서 없음")
+    return f"조회: {who} {kind} {len(sources)}건 — {tail}"
+
+
+# ---------------------------------------------------------------- 상투구 제거
+#
+# 【REVIEW 는 '필터' 가 아니었다 — 2026-09-03 확인】
+# REVIEW 는 코드가 지우는 규칙이 아니라 **모델에게 보내는 지시문**이다.
+# 완전일치도 부분일치도 정규식도 아니고, 그냥 "삭제하라" 는 문장이었다.
+# 그래서 회귀 6번에서 "관련 기관에 문의하시기 바랍니다" 가 그대로 남았다.
+# 프롬프트로 세 번 막아 세 번 실패한 전례가 이 리포에 이미 있다. 코드로 지운다.
+#
+# 【부분일치로 잡는다. 문장 단위로만 지운다】
+# 어미가 계속 바뀐다("문의하세요" · "문의하시기 바랍니다" · "문의해 보시기 바랍니다").
+# 어간만 잡고, 걸린 **문장 하나**만 버린다. 문단을 통째로 지우지 않는다.
+BOILERPLATE = (
+    "관련 기관에 문의", "전문가와 상담", "전문가에게 상담", "확인하시기 바랍니다",
+    "참고하시기 바랍니다", "문의하시기 바랍니다", "문의하여 주시기",
+    "공개되지 않을 가능성", "내부 회의록에서 확인", "추가적인 정보가 필요하시면",
+    "도움이 될 것", "문의해 주시기",
+)
+
+
+def strip_boilerplate(text: str) -> str:
+    """공시 근거가 없는 상투적 안내 문장을 지운다. 문단 구조는 유지한다.
+
+    지워야 하는 것 — "추가 정보는 관련 기관에 문의하시기 바랍니다",
+    "전문가와 상담하십시오", "원문을 확인하시기 바랍니다", "참고하시기 바랍니다".
+    남겨야 하는 것 — 수치·사실을 말하는 문장, "공시에서 확인되지 않습니다" 같은 거절.
+    """
+    try:
+        out_paras = []
+        for para in re.split(r"(\n\s*\n)", text or ""):
+            if para.strip() == "" or para.startswith("\n"):
+                out_paras.append(para)          # 문단 구분자는 그대로
+                continue
+            kept = [s for s in _SENT.findall(para)
+                    if not any(w in s for w in BOILERPLATE)]
+            out_paras.append("".join(kept).strip())
+        joined = "".join(out_paras)
+        # 문장을 다 지워 빈 답이 되면 원문을 돌려준다 — 지우려다 답을 잃지 않는다
+        return joined.strip() or (text or "").strip()
+    except Exception:                          # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        return text or ""
 
 
 def drop_baseless_geun(text: str) -> str:
@@ -390,7 +496,19 @@ def attach_sources(text: str, sources: list) -> tuple:
     if not sources:
         # 붙일 출처가 없다 = 도구가 아무것도 못 가져왔다. 그런 답에 '근거' 는 없다
         return drop_baseless_geun(body), []
-    picked, out = used_sources(body, sources), []
+    # 【무엇에 대고 인용을 찾는가 — 여기서 한 번 틀릴 뻔했다】
+    # `body`(모델이 쓴 근거 절을 떼어낸 것)에 대고 찾으면 안 된다.
+    # 모델은 출처를 본문 중간이 아니라 **자기가 쓴 근거 절에** 적는 일이 많다.
+    # 그걸 먼저 떼고 찾으면 "안 가리켰다" 로 잘못 판정해, 맞는 답에서도 근거가 사라진다.
+    # (실측: 최근 회귀 7문항 중 4건이 그렇게 오판됐다.)
+    # 그래서 **모델이 준 원문 그대로**(text)에 대고 찾는다. 우리가 붙인 목록은
+    # 아직 없으므로 순환하지 않는다.
+    picked = used_sources(text, sources)
+    if not picked:
+        # 조회는 했는데 답변이 그 문서를 하나도 가리키지 않았다.
+        # 비우지 않고 **무엇을 조회했는지**를 적는다(2026-09-03).
+        return f"{drop_baseless_geun(body)}\n\n근거\n- {scope_line(sources, body)}", []
+    out = []
     for s in picked:                       # 순서를 지키며 중복 제거
         if s not in out:
             out.append(s)
@@ -432,6 +550,13 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
         out["note"] = f"루프 실패: {type(e).__name__}: {e}"
     if not (out.get("answer") or "").strip():
         out["answer"] = FALLBACK + (f" (사유: {out['note']})" if out.get("note") else "")
+    # 공시 근거 없는 상투구는 근거 절을 붙이기 **전에** 지운다.
+    # 나중에 지우면 근거 절까지 함께 흔들린다.
+    try:
+        out["answer"] = strip_boilerplate(out["answer"])
+    except Exception as e:                     # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        out["note"] = (out.get("note") or "") + f" · 상투구 제거 실패: {e}"
     # 근거 절은 모델이 아니라 여기서 만든다. 형식이 흔들리면 안 된다
     try:
         out["answer"], out["sources"] = attach_sources(out["answer"], out.get("sources") or [])
