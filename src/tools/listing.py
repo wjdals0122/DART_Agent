@@ -133,6 +133,35 @@ def group_counts(stock_code: str) -> dict:
     return out
 
 
+def looks_placeholder(rc: str) -> bool:
+    """프롬프트 예시의 자리표시자를 그대로 넣었나.
+
+    【왜 필요한가 — 2026-09-04 실측】
+    e2e 2번(HD현대중공업 MGC 2척)에서 모델이
+    `list_disclosures(series_of="20230310XXXXXX")` 를 불렀다.
+    질문의 날짜(2023-03-10)에 **프롬프트 예시의 `XXXXXX` 를 그대로 이어 붙인 것**이다.
+    받은 답이 "형식이 틀렸다 — 14자리 숫자여야 한다" 여서, 모델은 자기가 예시를
+    베꼈다는 사실을 알아채지 못하고 다른 경로로 새어 갔다.
+
+    【무엇을 자리표시자로 보는가 — 좁게 잡았다】
+      (1) X 나 x 가 하나라도 있다   — 실제 접수번호는 숫자뿐이라 오탐이 없다
+      (2) 같은 글자 하나로만 이루어졌다 ("00000000000000", "11111111111111")
+    **0 이 연속으로 몇 개** 같은 규칙은 쓰지 않는다. 실측으로 진짜 접수번호에
+    0 이 여섯 개 연속인 것이 있다(`20240930000001` 등 4건). 그걸 자리표시자로 몰면
+    멀쩡한 조회를 막는다. 접수번호는 앞 8자리가 날짜라 (2) 에 걸릴 수 없다.
+    """
+    rc = str(rc or "")
+    if "X" in rc or "x" in rc:
+        return True
+    return len(rc) >= 6 and len(set(rc)) == 1
+
+
+PLACEHOLDER_NOTE = (
+    "접수번호가 자리표시자다. 실제 14자리 접수번호를 쓰거나, "
+    "회사명과 날짜로 조회하라"
+)
+
+
 def rcept_problem(value):
     """접수번호가 쓸 수 없는 값이면 이유 문장을, 멀쩡하면 None 을 돌려준다.
 
@@ -140,6 +169,9 @@ def rcept_problem(value):
     """
     _load()
     rc = str(value).strip()
+    # 자리표시자는 '형식 오류' 보다 먼저 본다. 원인을 정확히 짚어야 모델이 고친다.
+    if looks_placeholder(rc):
+        return f"{PLACEHOLDER_NOTE}. {FIX_HINT}"
     if not (rc.isdigit() and len(rc) == RCEPT_LEN):
         return (f"접수번호 {rc!r} 는 형식이 틀렸다 — {RCEPT_LEN}자리 숫자여야 한다. "
                 f"{FIX_HINT}")

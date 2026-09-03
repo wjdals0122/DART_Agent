@@ -57,9 +57,14 @@ print("=" * 74)
 
 n = C.progress_note(res(SEC))
 check("진행 및 변경사항 절에 붙는다", bool(n), (n or "").splitlines()[0][:60])
-check("요약이라고 말한다", "요약" in (n or ""))
-check("최신 확정치가 아닐 수 있다고 말한다", "최신 확정치" in (n or ""))
-check("어디서 확인할지 말한다", "거래소공시" in (n or ""))
+# 2026-09-04 문구 교체 — "쓰지 마라" 에서 "어떻게 읽어라" 로.
+# 옛 문구("최신 확정치가 아닐 수 있다")는 표에서 멀어지게 만들었고,
+# e2e 2번의 정답이 바로 그 표에 있었는데 모델이 안 봤다.
+check("표를 어떻게 읽는지 말한다", "(변경공시" in (n or ""), (n or "")[:80])
+check("변경 반영값이라고 말한다", "반영된 값" in (n or ""))
+check("표기가 없을 때를 따로 말한다", "표기가 없어도" in (n or ""))
+check("어디서 대조할지 말한다", "거래소공시" in (n or ""))
+check("'쓰지 마라' 로 읽히지 않는다", "최신 확정치가 아닐 수 있다" not in (n or ""))
 check("추정임을 밝힌다", (n or "").startswith("※ 자동 주석(공시 원문 아님)"))
 
 check("재무제표 절에는 안 붙는다",
@@ -100,12 +105,12 @@ print("=" * 74)
 ctx = C.build_context([res(SEC)])
 lines = ctx.splitlines()
 doc_i = next((i for i, l in enumerate(lines) if l.startswith('<document id="1"')), -1)
-check("경고가 <document> 앞에 있다", doc_i > 0 and "최신 확정치" in "\n".join(lines[:doc_i]),
-      repr(lines[:doc_i]))
+check("경고가 <document> 앞에 있다",
+      doc_i > 0 and "(변경공시" in "\n".join(lines[:doc_i]), repr(lines[:doc_i]))
 check("본문은 그대로", "583억원" in ctx)
 
 ctx2 = C.build_context([res("III. 재무에 관한 사항 > 2. 연결재무제표")])
-check("다른 절에는 경고가 없다", "최신 확정치" not in ctx2)
+check("다른 절에는 경고가 없다", "(변경공시" not in ctx2)
 
 print()
 print("=" * 74)

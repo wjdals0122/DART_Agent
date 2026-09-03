@@ -175,6 +175,41 @@ def main() -> int:
             print(f"      [{h['rank']}] {h['source']['report_nm']} · "
                   f"{h['source']['section'][:60]}")
 
+    # 자리표시자 접수번호 — 프롬프트 예시를 그대로 넣은 경우
+    #
+    # e2e 2번에서 모델이 list_disclosures(series_of="20230310XXXXXX") 를 불렀다.
+    # 질문의 날짜에 예시의 XXXXXX 를 이어 붙인 것이다. 옛 안내("형식이 틀렸다")로는
+    # 모델이 자기가 예시를 베꼈다는 걸 못 알아챘다.
+    print("\n--- 자리표시자 접수번호 ---")
+    from src.tools.listing import looks_placeholder  # noqa: E402
+
+    for v in ("20230310XXXXXX", "20260619XXXXXX", "00000000000000",
+              "11111111111111", "xxxxxxxxxxxxxx"):
+        check(f"  자리표시자로 잡는다 — {v}", looks_placeholder(v))
+    for v in ("20240319000684", "20240930000001", "20250520000006"):
+        check(f"  진짜 접수번호는 안 잡는다 — {v}", not looks_placeholder(v))
+
+    # 코퍼스 전량에 오탐이 없는지. 진짜 접수번호에 0 이 여섯 개 연속인 것이 있다.
+    man = ROOT / "corpus" / "manifest.jsonl"
+    if man.is_file():
+        real = [str(json.loads(l)["rcept_no"])
+                for l in man.read_text(encoding="utf-8").splitlines() if l.strip()]
+        wrong = [r for r in real if looks_placeholder(r)]
+        check(f"  코퍼스 {len(real):,}건에 오탐 없음", not wrong, str(wrong[:5]))
+
+    for tool, key in (("list_disclosures", "series_of"),
+                      ("search_disclosure", "rcept_no")):
+        kw = {"corp_name": "HD현대중공업", key: "20230310XXXXXX"}
+        if tool == "search_disclosure":
+            kw["query"] = "MGC 2척"
+        out = TOOLS[tool](**kw)
+        check(f"  {tool}({key}=자리표시자) status=error",
+              out.get("status") == "error", str(out.get("status")))
+        check(f"  {tool} 안내가 '자리표시자' 라고 말한다",
+              "자리표시자" in (out.get("note") or ""), str(out.get("note"))[:80])
+        check(f"  {tool} 대안을 말한다",
+              "회사명과 날짜" in (out.get("note") or ""))
+
     # tools.json 이 스키마로서 말이 되는지
     print("\n--- tools.json ---")
     cfg = json.loads((ROOT / "config" / "tools.json").read_text(encoding="utf-8"))
