@@ -221,6 +221,14 @@ def run(cases: list, sleep: float, model, deadline: float) -> list:
             "sources": res.get("sources") or [],
             "n_tool_calls": len(res.get("tool_calls") or []),
             "tool_names": [t.get("name") for t in (res.get("tool_calls") or [])],
+            # 【인자를 그대로 남긴다 — 2026-09-04】
+            # 이름만 남기던 때에 회귀 4번의 원인을 잘못 짚었다. "fiscal_year 를
+            # 2023 으로 넣은 탓" 이라고 적었는데, 실제로는 2024 로 넣어 분기보고서의
+            # 전기 열을 읽은 것이었다. 인자가 없으니 추정할 수밖에 없었다.
+            # 실패를 검색·계획·작문 중 어디로 가를지는 **무엇을 넣고 불렀는가**로 갈린다.
+            "tool_calls": [{k: c.get(k) for k in
+                            ("n", "name", "arguments", "status", "summary", "note")}
+                           for c in (res.get("tool_calls") or [])],
             "elapsed": round(time.time() - t0, 2),
             "usage": res.get("usage") or {},
             "note": res.get("note") or "",
@@ -317,7 +325,16 @@ def report(rows: list, base: dict | None, quick: bool) -> str:
         L.append("")
         L.append(f"기대: `{r['want']}`")
         L.append("")
-        L.append(f"도구 {r['n_tool_calls']}회 {r['tool_names']} · {r['elapsed']:.1f}초")
+        L.append(f"도구 {r['n_tool_calls']}회 · {r['elapsed']:.1f}초")
+        # 인자를 눈으로 볼 수 있게 한 줄씩. 원인을 추정하지 않으려면 이게 있어야 한다.
+        for c in (r.get("tool_calls") or []):
+            args = json.dumps(c.get("arguments") or {}, ensure_ascii=False, default=str)
+            line = f"  {c.get('n')}. `{c.get('name')}({args})` → {c.get('status')}"
+            if c.get("summary"):
+                line += f" · {c['summary']}"
+            L.append(line)
+            if c.get("status") != "ok" and c.get("note"):
+                L.append(f"     사유: {str(c['note']).splitlines()[0][:160]}")
         L.append("")
         L.append("```")
         L.append((r["answer"] or "(빈 답변)").strip())
@@ -357,12 +374,12 @@ def main() -> int:
     payload = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "quick": a.quick,
                "rows": rows}
     if a.baseline:
-        BASELINE_JSON.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+        BASELINE_JSON.write_text(json.dumps(payload, ensure_ascii=False, indent=1, default=str),
                                  encoding="utf-8")
         BASELINE_MD.write_text(md, encoding="utf-8")
         out = BASELINE_MD
     else:
-        LAST_JSON.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+        LAST_JSON.write_text(json.dumps(payload, ensure_ascii=False, indent=1, default=str),
                              encoding="utf-8")
         LAST_MD.write_text(md, encoding="utf-8")
         out = LAST_MD
