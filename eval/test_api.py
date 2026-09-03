@@ -30,6 +30,12 @@ for _s in (sys.stdout, sys.stderr):
 from src.agent import loop as loop_mod  # noqa: E402
 from src.api import server as S  # noqa: E402
 
+# 이 검증은 handle_answer 를 수십 번 부른다. 그대로 두면 운영용 요청 로그
+# (logs/requests.jsonl)에 시험 요청이 섞여 실제 평가 기록을 더럽힌다. 임시 파일로 돌린다.
+import tempfile  # noqa: E402
+
+S.REQ_LOG = Path(tempfile.gettempdir()) / "dis044_req_test.jsonl"
+
 BAR = "=" * 74
 FAIL: list = []
 FIELDS = ("question_id", "question", "retrieved_context", "think_trace", "answer")
@@ -184,7 +190,71 @@ def main() -> int:
     check("빈 값도 키는 남는다",
           _params(b"question_id=&question=") == {"question_id": "", "question": ""})
 
-    print(f"\n{BAR}\n7 — 그 밖\n{BAR}")
+    # 2026-09-03 사고 재현 — Git Bash curl 이 실제로 보낸 바이트 그대로.
+    # '하이' -> %c7%cf%c0%cc (cp949). FastAPI 껍데기는 이걸 UTF-8 로 읽어 통째로 깨뜨렸다.
+    raw = (b"question=SK%c7%cf%c0%cc%b4%d0%bd%ba+2024%b3%e2+%bf%ac%b0%e1"
+           b"+%b8%c5%c3%e2%be%d7%c0%cc+%be%f3%b8%b6%be%df%3f")
+    got = _params(raw)["question"]
+    check("실제 curl 바이트(cp949)를 그대로 복원", got == want, repr(got))
+    check("U+FFFD 가 하나도 없다", "�" not in got, repr(got))
+
+    special = "삼성전자·SK하이닉스 (2024년) 매출?"
+    for enc in ("utf-8", "cp949"):
+        qs = ("question=" + quote(special, encoding=enc)).encode("ascii")
+        check(f"특수문자 질문 왕복 ({enc})", _params(qs)["question"] == special,
+              repr(_params(qs)["question"]))
+
+    print(f"\n{BAR}\n7 — 응답 필드 이름을 못박는다\n{BAR}")
+    #
+    # 오타 하나가 200문항 전체에 걸린다. 주최측 명세의 5필드는 정확히 이것뿐이다.
+    #
+    WANT = ("question_id", "question", "retrieved_context", "think_trace", "answer")
+    check("server.FIELDS 가 명세와 정확히 같다", tuple(S.FIELDS) == WANT, str(S.FIELDS))
+
+    def keys_of(**kw):
+        return set(call("/answer", **kw)[1])
+
+    S.STATE["ready"] = True
+    loop_mod.answer = fake_ok
+    check("정상 응답 키 집합", keys_of(question_id="Q", question="질문") == set(WANT))
+    loop_mod.answer = real
+
+    def _boom(question, **kw):
+        raise RuntimeError("폭발")
+
+    loop_mod.answer = _boom
+    check("예외 응답 키 집합", keys_of(question_id="Q", question="질문") == set(WANT))
+    loop_mod.answer = real
+    check("question 누락 응답 키 집합", keys_of(question_id="Q") == set(WANT))
+    check("라우팅 오류 응답 키 집합",
+          set(S.make_answer("Q", "")) == set(WANT), str(sorted(S.make_answer("Q", ""))))
+
+    src = (ROOT / "src" / "api" / "server.py").read_text(encoding="utf-8")
+    typos = [w for w in ("retrievedd", "retrived", "retreived", "think_race",
+                         "question_Id", "quesiton") if w in src]
+    check("비슷한 오타가 소스에 없다", not typos, str(typos))
+
+    print(f"\n{BAR}\n8 — 요청 로그에 한글이 그대로 남는다\n{BAR}")
+    if S.REQ_LOG.exists():
+        S.REQ_LOG.unlink()                     # 앞 절에서 쌓인 줄을 비우고 센다
+    try:
+        loop_mod.answer = fake_ok
+        call("/answer", question_id="Q-로그", question=want)
+        loop_mod.answer = real
+        lines = S.REQ_LOG.read_text(encoding="utf-8").strip().splitlines()
+        row = json.loads(lines[-1])
+        check("로그가 한 줄 남았다", len(lines) == 1, str(len(lines)))
+        check("질문이 한글 그대로", row["question"] == want, repr(row["question"]))
+        check("question_id 도 한글 그대로", row["question_id"] == "Q-로그",
+              repr(row["question_id"]))
+        check("status 가 남는다", row["status"] == 200, str(row.get("status")))
+        raw_bytes = S.REQ_LOG.read_bytes()
+        check("파일이 UTF-8 이다", want.encode("utf-8") in raw_bytes)
+    finally:
+        if S.REQ_LOG.exists():
+            S.REQ_LOG.unlink()
+
+    print(f"\n{BAR}\n9 — 그 밖\n{BAR}")
     st, body, _ = call("/nope")
     check("모르는 경로는 404", st == 404, str(st))
     check("내부 데드라인 50초", loop_mod.DEADLINE == 50.0, str(loop_mod.DEADLINE))

@@ -23,16 +23,22 @@
    percent-decoding 을 바이트 단계에서 직접 하고 UTF-8 → cp949 순으로 읽는다.
    실측: Windows 셸의 curl 이 '하이' 를 %c7%cf%c0%cc(cp949) 로 보냈다.
 
-【FastAPI 가 있으면 FastAPI, 없으면 순수 ASGI】
-이 PC 에는 fastapi 가 없고, 넣으려면 pydantic 2.8.2 → 2.13.5 와
-typing_extensions 를 올려야 한다. torch/FlagEmbedding 에 bge-m3 벡터가 묶여 있어
-마감 직전에 건드릴 수 없다(CLAUDE.md). uvicorn 만으로 도는 ASGI 경로를 기본으로 두고,
-fastapi 가 있는 환경에서는 그쪽을 쓴다. **응답과 상태코드는 둘이 완전히 같다** —
-판단 로직은 handle_* 한 곳에만 있고 아래는 얇은 껍데기다.
+【언제나 순수 ASGI 로 뜬다 — 2026-09-03 변경】
+예전에는 "fastapi 가 깔려 있으면 그쪽을 쓴다" 였고 "응답과 상태코드는 완전히 같다" 고
+적어 두었다. **틀렸다.** FastAPI 껍데기는 쿼리 파라미터를 Starlette 이
+UTF-8 고정으로 디코딩해서, cp949 로 보내는 클라이언트의 한글 질문이 통째로 깨졌다.
+서버에 fastapi 가 깔려 있어 실제로 그 경로가 떠 있었고 그대로 나갔다.
+
+fastapi 는 이 개발 PC 에 설치할 수 없다(pydantic 2.8.2 → 2.13.5 를 끌고 와
+bge-m3 환경을 흔든다. CLAUDE.md). 즉 **로컬에서 시험할 수 없는 경로**였고,
+시험되지 않은 경로를 기본으로 둔 것이 사고의 원인이다.
+지금은 `DART_API_FASTAPI=1` 을 명시해야만 그 껍데기를 쓴다. 그 경우에도
+쿼리는 아래 `_params()` 로 똑같이 읽는다.
 """
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import time
@@ -209,13 +215,40 @@ def handle_health() -> tuple:
                  "uptime": round(time.time() - STATE["started_at"], 1)}
 
 
+REQ_LOG = ROOT / "logs" / "requests.jsonl"
+
+
+def log_request(question_id: str, question: str, status: int, sec: float) -> None:
+    """받은 질문을 **UTF-8 로** 한 줄 남긴다. 실패해도 응답을 막지 않는다.
+
+    uvicorn 의 access 로그에는 percent-encoding 된 경로만 남아 한글을 눈으로
+    확인할 수 없다. 인코딩 사고가 났을 때 "무엇을 받았는가" 를 볼 자리가 필요하다.
+    """
+    try:
+        REQ_LOG.parent.mkdir(parents=True, exist_ok=True)
+        row = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "status": status,
+               "question_id": question_id, "question": question,
+               "seconds": round(sec, 2)}
+        with open(REQ_LOG, "a", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception as e:                     # noqa: BLE001 — 로그가 답을 막으면 안 된다
+        print(f"[api] 요청 로그 기록 실패: {type(e).__name__}: {e}",
+              file=sys.stderr, flush=True)
+
+
 def handle_answer(params: dict) -> tuple:
+    qid = params.get("question_id", "")
+    q = params.get("question", "")
     if not STATE["ready"]:
         # 기동 전에는 503. 주최측이 재시도하는 사이에 준비가 끝난다.
+        log_request(qid, q, 503, 0.0)
         return 503, {"status": "starting", "detail": STATE["error"] or "모델 로딩 중",
                      "elapsed": round(time.time() - STATE["started_at"], 1)}
     STATE["served"] += 1
-    return 200, make_answer(params.get("question_id", ""), params.get("question", ""))
+    t0 = time.time()
+    body = make_answer(qid, q)
+    log_request(qid, q, 200, time.time() - t0)
+    return 200, body
 
 
 def route(path: str, params: dict) -> tuple:
@@ -299,9 +332,34 @@ async def app(scope, receive, send) -> None:
 
 
 def build_fastapi():
-    """fastapi 가 있으면 같은 handle_* 를 감싸 준다. 없으면 None."""
+    """fastapi 껍데기. **기본으로는 쓰지 않는다** — `DART_API_FASTAPI=1` 일 때만.
+
+    【2026-09-03 · 치명적 버그를 여기서 냈다】
+    예전에는 "fastapi 가 있으면 그쪽을 쓴다" 였고, 주석에 "응답과 상태코드는 완전히
+    같다" 라고 적어 두었다. **틀렸다.** 같지 않은 곳이 하나 있었다 — 쿼리 파라미터를
+    누가 디코딩하느냐다.
+
+      순수 ASGI : _params() 가 바이트를 쥐고 UTF-8 → cp949 순으로 읽는다
+      FastAPI   : Starlette 이 UTF-8 + errors="replace" 로 고정 디코딩한다
+
+    이 PC 의 Git Bash curl 은 한글을 **cp949** 로 인코딩해 보낸다(실측:
+    '하이' → %c7%cf%c0%cc). 서버에 fastapi 가 깔려 있어 그쪽이 떠 있었고,
+    cp949 바이트가 UTF-8 로 읽히면서 question 이 통째로 U+FFFD 가 됐다.
+
+      요청 question=SK하이닉스 …  →  응답 "question":"SK���̴н� …"
+
+    같은 응답의 retrieved_context·answer 는 서버가 만든 문자열이라 멀쩡했다.
+    그래서 '출력이 아니라 입력 경로' 로 좁혀졌다.
+
+    【그래서 두 가지를 했다】
+    1. 이 껍데기도 `_params()` 로 쿼리를 읽는다 — 선언형 파라미터를 쓰지 않는다
+    2. **기본을 순수 ASGI 로 되돌렸다.** fastapi 는 이 개발 PC 에 설치할 수 없어
+       (pydantic 2.8.2 → 2.13.5 를 끌고 와 bge-m3 환경을 흔든다) **이 경로는
+       로컬에서 시험할 수가 없다.** 시험되지 않은 경로를 기본으로 두었다가
+       이 버그가 났다. 쓰려면 `DART_API_FASTAPI=1` 로 **명시**해야 한다.
+    """
     try:
-        from fastapi import FastAPI
+        from fastapi import FastAPI, Request
         from fastapi.responses import JSONResponse
     except ImportError:
         return None
@@ -318,15 +376,19 @@ def build_fastapi():
         return JSONResponse(body, status_code=st)
 
     @api.get("/answer")
-    def _answer(question_id: str = "", question: str = ""):
-        st, body = handle_answer({"question_id": question_id, "question": question})
+    def _answer(request: Request):
+        # 선언형 파라미터(question: str = "")를 쓰면 Starlette 이 UTF-8 고정으로
+        # 디코딩한다. 순수 ASGI 와 같은 결과를 내려면 바이트를 직접 읽어야 한다.
+        st, body = handle_answer(_params(request.scope.get("query_string") or b""))
         return JSONResponse(body, status_code=st)
 
     return api
 
 
-_fastapi = build_fastapi()
-if _fastapi is not None:                       # 있으면 그쪽이 app 이 된다
+# 기본은 순수 ASGI. fastapi 를 쓰려면 환경변수로 명시한다(위 주석 참고).
+USE_FASTAPI = os.environ.get("DART_API_FASTAPI", "") == "1"
+_fastapi = build_fastapi() if USE_FASTAPI else None
+if _fastapi is not None:
     app = _fastapi                             # noqa: F811
 
 

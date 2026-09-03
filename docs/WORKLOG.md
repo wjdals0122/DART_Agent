@@ -3547,3 +3547,111 @@ assistant(답변) + user(지시) 를 넣었다. **모델에게 보이는 지시 
 
 그러니 고치려면 **계약명으로 짝을 지어야** 한다. 랭킹 로직을 새로 만들지 말라는
 지시가 있어 여기서 멈추고 보고한다.
+
+---
+
+## step10 — 한글 질문이 깨지던 것 (2026-09-03) · **치명적**
+
+### 증상
+
+외부에서 curl 로 부른 결과, 응답의 `question` 만 깨졌다.
+
+```
+요청 : question=SK하이닉스 2024년 연결 매출액이 얼마야?
+응답 : "question":"SK???̴н? 2024?? ???? ???????? ?????"
+```
+
+같은 응답의 `retrieved_context` · `answer` 는 멀쩡했다. 그 둘은 서버가 만든
+문자열이고 `question` 만 **클라이언트가 보낸 것**이다. 그래서 출력이 아니라
+**쿼리 파라미터를 읽는 경로**로 좁혀졌다.
+
+### 원인 — 두 겹이다
+
+**(1) 이 PC 의 Git Bash curl 은 한글을 cp949 로 보낸다.** 실측했다.
+127.0.0.1 에 소켓을 열어 요청 라인을 그대로 받아 봤다.
+
+```
+GET /answer?question=SK%c7%cf%c0%cc%b4%d0%bd%ba+2024%b3%e2+... HTTP/1.1
+```
+
+`%c7%cf%c0%cc` = cp949 의 '하이'. UTF-8 이면 `%ED%95%98%EC%9D%B4` 여야 한다.
+(같은 문자열을 파이썬 subprocess 로 넘기면 UTF-8 로 나간다 — 셸의 argv 경로 문제다.)
+
+**(2) 서버가 FastAPI 껍데기로 떠 있었고, 그쪽은 UTF-8 고정으로 디코딩한다.**
+
+`server.py` 에는 껍데기가 둘 있다.
+
+| 껍데기 | 쿼리 디코딩 |
+|---|---|
+| 순수 ASGI | `_params()` 가 바이트를 쥐고 **UTF-8 → cp949** 순으로 읽는다 |
+| FastAPI | Starlette 이 `UTF-8 + errors="replace"` 로 **고정** |
+
+cp949 바이트를 UTF-8 로 읽으면 전부 U+FFFD 가 된다. 그게 화면에 `?` 로 보인 것이다.
+파이썬으로 재현해 문자열까지 맞췄다 — `cp949 로 인코딩한 바이트를 UTF-8 replace 로
+디코딩`한 결과가 신고된 문자열과 같다.
+
+옛 코드는 **"fastapi 가 깔려 있으면 그쪽을 쓴다"** 였고, 주석에는
+**"응답과 상태코드는 둘이 완전히 같다"** 라고 적혀 있었다. **틀린 주석이었다.**
+서버에 `fastapi` 를 설치해 두었으니 시험되지 않은 쪽이 떠 있었다.
+
+떠 있는 서버가 어느 쪽인지는 LLM 없이 확인했다.
+
+```
+curl http://49.50.141.125/          -> {"detail":"Not Found"} 404   ← Starlette 기본 404
+                                       (순수 ASGI 라면 서비스 안내 JSON 200)
+curl .../answer?question_id=<한글>  -> "SK���̴н� ..."             ← 깨짐 재현
+curl .../answer?question_id=<UTF-8> -> "SK하이닉스 ..."             ← 정상
+```
+
+`question` 을 비우고 `question_id` 로만 확인해 **LLM 을 한 번도 부르지 않았다**.
+
+### 고친 것
+
+1. **기본을 순수 ASGI 로 되돌렸다.** `DART_API_FASTAPI=1` 을 명시해야만 FastAPI 를 쓴다.
+   fastapi 는 이 개발 PC 에 설치할 수 없어(pydantic 2.8.2 → 2.13.5 가 bge-m3 환경을
+   흔든다) **로컬에서 시험할 수 없는 경로**다. 시험 못 하는 경로를 기본으로 둔 것이
+   사고의 원인이다.
+2. FastAPI 껍데기도 선언형 파라미터(`question: str = ""`)를 버리고
+   `_params(request.scope["query_string"])` 로 읽게 했다. 쓰더라도 결과가 같다.
+3. **`logs/requests.jsonl`** 을 추가했다. 받은 `question` 을 UTF-8 한 줄로 남긴다.
+   uvicorn access 로그에는 percent-encoding 된 경로만 남아 한글을 눈으로 못 본다.
+   기록에 실패해도 응답을 막지 않는다.
+
+### 검증
+
+`eval/test_api.py` 에 세 절을 더했다(**LLM 0회**).
+
+- **6절** — 사고 당시 curl 이 보낸 **바이트 그대로**를 넣어 원문 복원 확인,
+  U+FFFD 0개, 특수문자 질문(`삼성전자·SK하이닉스 (2024년) 매출?`) UTF-8/cp949 왕복
+- **7절** — 응답 키 집합이 명세 5개와 **정확히 일치**하는지. 정상·예외·question 누락·
+  라우팅 오류 네 경로 전부. `server.FIELDS` 자체도 검사하고, 소스에
+  `retrievedd`·`retrived`·`think_race` 같은 오타가 없는지도 본다
+- **8절** — `requests.jsonl` 에 한글이 그대로, 파일이 UTF-8 인지
+
+시험이 운영 로그를 더럽히던 것도 고쳤다 — `test_api.py` 가 `S.REQ_LOG` 를
+임시 파일로 돌린다(실측: 한 번 돌릴 때마다 11줄이 운영 로그에 섞였다).
+
+**LLM 0회 검증 10종 전부 통과.**
+
+### 실제 호출 1회 — 고친 서버에 Git Bash curl(cp949)로
+
+```
+HTTP 200 · 11.67초 · 11,713 bytes · 키 5개 · 전부 문자열 · U+FFFD 0개
+question : SK하이닉스 2024년 연결 매출액이 얼마야?      ← 입력과 정확히 일치
+answer   : 2024년 SK하이닉스의 연결 매출액은 66,192,960백만원입니다.
+access 로그: GET /answer?...question=SK%c7%cf%c0%cc... 200 OK   ← cp949 로 들어왔다
+requests.jsonl: {"question": "SK하이닉스 2024년 연결 매출액이 얼마야?", ...}
+```
+
+### `resolve_company` 가 회사명을 줄이던 문제 — 재현되지 않는다
+
+고친 서버의 `think_trace`:
+
+```
+1. 질문 분석: SK하이닉스, 2024 사업연도
+2. search_disclosure(corp_name="SK하이닉스", fiscal_year=2024, query="연결 매출액") → ok, 5건
+```
+
+`corp_name="SK"` 도, `ambiguous` 도, SK텔레콤 혼입도, "SK그룹 전체 83,801,471백만원"
+같은 합계도 없다. **한글이 깨진 상태의 증상이었다.** 모델이 `SK???̴н?` 에서
+알아볼 수 있는 부분이 `SK` 뿐이었던 것이다. 지시대로 아무것도 고치지 않았다.
