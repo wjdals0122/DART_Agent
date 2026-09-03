@@ -345,6 +345,50 @@ def _summary(name: str, out: dict) -> str:
     return f"{n}건{extra}"
 
 
+# 산문형 근거 줄 — "근거: [○○ 사업보고서 …, 접수번호 …]" 한 줄짜리.
+#
+# 【왜 예전엔 안 뗐고, 왜 이제 떼는가】
+# `_GEUN` 은 목록형(`근거\n- …`)만 잡는다. 산문형을 남긴 이유는 코드에 이렇게 남아 있다 —
+# `drop_baseless_geun` 이 "근거: 상법 제391조에 따라…" 처럼 **라벨만 근거이고 내용은
+# 일반 지식**인 문단을 따로 처리하기 때문이다. 그 처리는 **출처가 0건일 때만** 돈다.
+# 그래서 출처가 있는 답변에서는 산문형 줄이 그대로 남아 근거가 두 번 나왔다
+# (e2e_v4 29·32·33번).
+#
+# 두 규칙은 겹치지 않는다. `drop_baseless_geun` 이 잡는 것은 **출처 라벨이 없는** 문단이고,
+# 아래는 **출처 라벨뿐인** 줄이다. 그래서 조건을 좁혀 아래 셋을 다 만족할 때만 뗀다.
+#   (1) 답변의 **마지막 줄**이고
+#   (2) `근거:` 또는 `출처:` 로 시작하고
+#   (3) 그 줄에 대괄호 출처 라벨(또는 접수번호)만 있고 다른 서술이 없다
+# 본문 중간의 "근거: …" 는 문장의 일부일 수 있으므로 건드리지 않는다.
+_GEUN_PROSE = re.compile(r"^[ \t]*(?:\*\*)?(?:근거|출처)(?:\*\*)?[ \t]*[:：][ \t]*(.*)$")
+_SRC_LABEL = re.compile(r"\[[^\]]*\]")
+
+
+def _only_sources(rest: str) -> bool:
+    """'근거:' 뒤에 출처 라벨(또는 접수번호)만 있고 서술이 없나."""
+    left = _SRC_LABEL.sub("", rest or "")
+    left = _RCEPT.sub("", left)
+    left = re.sub(r"[\s,、·และ&and및와과()]+", "", left, flags=re.I)
+    return rest.strip() != "" and left == ""
+
+
+def strip_prose_geun(text: str) -> str:
+    """마지막 줄이 '출처 라벨뿐인 근거: 줄' 이면 뗀다. 아니면 그대로."""
+    try:
+        lines = (text or "").rstrip().split("\n")
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if not lines:
+            return text or ""
+        m = _GEUN_PROSE.match(lines[-1])
+        if m and _only_sources(m.group(1)):
+            return "\n".join(lines[:-1]).rstrip()
+        return "\n".join(lines).rstrip()
+    except Exception:                          # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        return text or ""
+
+
 def strip_sources_section(text: str) -> str:
     """모델이 쓴 '근거' 목록을 떼어낸다. 형식이 흔들리므로 우리가 다시 붙인다."""
     prev = None
@@ -352,6 +396,7 @@ def strip_sources_section(text: str) -> str:
     while prev != out:                     # 여러 번 붙였을 수도 있다
         prev = out
         out = _GEUN.sub("\n", out).rstrip()
+        out = strip_prose_geun(out)        # 목록형을 뗀 뒤 산문형이 드러나기도 한다
     return out
 
 
@@ -394,7 +439,15 @@ def used_sources(text: str, sources: list) -> list:
         corp, rep = _corp_report(s)
         if corp and rep and _flat(corp) in flat and _flat(rep) in flat:
             out.append(s)
-    return out
+    # 【되돌림 — 2026-09-04】 하나도 못 찾으면 전부 붙인다.
+    # step11 에서 이 줄을 없앴더니 e2e 40문항 중 **21문항**이 근거 절 없이 나갔다.
+    # 그 21문항은 전부 search_disclosure 가 ok 였고 5~16건을 물어 왔다 —
+    # 근거가 없는 게 아니라 답변 본문이 그 문서를 안 가리켰을 뿐이다.
+    # 프롬프트 예시로 본문 인용을 끌어내 봤지만 회귀 7문항에서 3→4로 사실상 그대로였다.
+    # 모델이 안 붙이는 것을 프롬프트로는 못 고친다. 근거 표기가 채점 항목이므로
+    # **무관한 문서가 섞이는 손해보다 절반이 비는 손해가 크다.**
+    # 무관한 문서가 섞이는 사례는 회귀 6번(자기주식 5건)에서 실제로 봤고, 알고 되돌린다.
+    return out or list(sources)
 
 
 def _corp_report(source: str) -> tuple:
@@ -448,6 +501,54 @@ BOILERPLATE = (
 )
 
 
+# ---------------------------------------------------------------- 서두 군더더기
+#
+# e2e_v4 40문항 중 **15건**이 "네, 공시 내용을 시간 순서에 따라 정리하겠습니다" 류로
+# 시작했다. 채점자가 읽는 첫 문장인데 내용이 없다.
+#
+# 아래 낱말 목록은 그 조사에서 쓴 것을 **그대로** 가져왔다. 새로 만들지 않았다.
+LEADIN_WORDS = ("네,", "네.", "예,", "위 자료를 바탕으로", "위 자료에 따르면", "제공된 자료",
+                "답변드리겠습니다", "다음과 같습니다", "정리하겠습니다", "정리하였습니다",
+                "아래와 같이", "요청하신", "조회한 결과", "알겠습니다", "확인하였습니다",
+                "답변하겠습니다", "정리해", "말씀하신")
+
+# 【무엇을 '사실이 없는 줄' 로 보는가 — 낱말만으로는 못 가른다】
+# 위 낱말이 들어 있어도 "네, 반대한 이사가 있었습니다" 는 **답을 담은 문장**이다.
+# 지우면 안 된다. 가르는 기준은 **문장이 무엇을 하는가**다.
+#   - 뒤에 올 내용을 **예고**하는 문장   -> 지운다
+#   - 값·판정을 **진술**하는 문장        -> 남긴다
+# 예고문은 끝맺음이 정해져 있다. 아래 어미로 끝나거나 콜론으로 끝난다.
+# ("…정리하겠습니다" "…다음과 같습니다:" "…표로 정리한 것입니다")
+# 진술문은 그렇지 않다("…있었습니다" "…66,192,960백만원입니다").
+# 두 조건(낱말 + 예고 어미)을 **모두** 만족하는 첫 줄만 지운다.
+LEADIN_TAIL = ("정리하겠습니다", "정리했습니다", "정리하였습니다", "정리한 것입니다",
+               "다음과 같습니다", "답변하겠습니다", "답변드리겠습니다", "요약했습니다",
+               "요약하였습니다", "분류하였습니다", "분류했습니다", "설명하겠습니다",
+               "알려드리겠습니다", "말씀드리겠습니다")
+
+
+def strip_leadin(text: str) -> str:
+    """답변 **첫 줄**이 내용 없는 예고문이면 지운다. 본문 중간은 건드리지 않는다."""
+    try:
+        body = (text or "").strip()
+        if not body:
+            return text or ""
+        lines = body.split("\n")
+        first = lines[0].strip()
+        head = first[:60]
+        if not any(w in head for w in LEADIN_WORDS):
+            return body
+        # 끝의 마침표·콜론을 떼고 어미를 본다 ("…정리하겠습니다." 도 예고문이다)
+        naked = first.rstrip().rstrip(".。:：!？? ").rstrip()
+        if not (first.rstrip().endswith((":", "：")) or naked.endswith(LEADIN_TAIL)):
+            return body                        # 값을 진술하는 문장이다 — 남긴다
+        rest = "\n".join(lines[1:]).strip()
+        return rest or body                    # 지워서 비면 원문 그대로
+    except Exception:                          # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        return text or ""
+
+
 def strip_boilerplate(text: str) -> str:
     """공시 근거가 없는 상투적 안내 문장을 지운다. 문단 구조는 유지한다.
 
@@ -461,12 +562,17 @@ def strip_boilerplate(text: str) -> str:
             if para.strip() == "" or para.startswith("\n"):
                 out_paras.append(para)          # 문단 구분자는 그대로
                 continue
-            kept = [s for s in _SENT.findall(para)
-                    if not any(w in s for w in BOILERPLATE)]
-            out_paras.append("".join(kept).strip())
+            # **줄 단위로 돈다.** 문단을 통째로 _SENT 에 넣으면 줄바꿈이 사라진다 —
+            # 번호 목록("1. …\n2. …")이 한 줄로 뭉개진다. 실제로 그랬다.
+            out_lines = []
+            for line in para.split("\n"):
+                kept = [s for s in _SENT.findall(line)
+                        if not any(w in s for w in BOILERPLATE)]
+                out_lines.append("".join(kept).rstrip())
+            out_paras.append("\n".join(out_lines).strip("\n").strip())
         joined = "".join(out_paras)
         # 문장을 다 지워 빈 답이 되면 원문을 돌려준다 — 지우려다 답을 잃지 않는다
-        return joined.strip() or (text or "").strip()
+        return strip_leadin(joined.strip() or (text or "").strip())
     except Exception:                          # noqa: BLE001
         traceback.print_exc(file=sys.stderr)
         return text or ""
@@ -505,8 +611,9 @@ def attach_sources(text: str, sources: list) -> tuple:
     # 아직 없으므로 순환하지 않는다.
     picked = used_sources(text, sources)
     if not picked:
-        # 조회는 했는데 답변이 그 문서를 하나도 가리키지 않았다.
-        # 비우지 않고 **무엇을 조회했는지**를 적는다(2026-09-03).
+        # `used_sources` 가 하나도 못 찾으면 전부 돌려주므로(2026-09-04 되돌림)
+        # `sources` 가 비지 않은 한 여기로 오지 않는다. 그래도 방어로 남긴다 —
+        # 비우지 말고 **무엇을 조회했는지**는 적는다.
         return f"{drop_baseless_geun(body)}\n\n근거\n- {scope_line(sources, body)}", []
     out = []
     for s in picked:                       # 순서를 지키며 중복 제거

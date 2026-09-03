@@ -51,10 +51,15 @@ check("둘 다 인용하면 둘 다",
       used_sources(f"{S_SAM} 와 {S_HYN}", [S_SAM, S_HYN]) == [S_SAM, S_HYN])
 
 refuse = ("삼성전자 이사회에서 반대한 이사가 있었는지는 공시에서 확인되지 않습니다.")
-check("본문이 안 가리키면 빈 리스트 — 회귀 6번 재현",
-      used_sources(refuse, [S_TREA] * 1 + [S_TREA]) == [],
+# 【2026-09-04 되돌림】 하나도 못 찾으면 전부 붙인다.
+# step11 에서 이걸 없앴더니 e2e 40문항 중 21문항이 근거 절 없이 나갔다.
+# 그 21문항은 전부 검색이 ok 였다 — 근거가 없는 게 아니라 본문이 안 가리켰을 뿐이다.
+# 무관한 문서가 섞이는 손해(회귀 6번 자기주식 5건)보다 그쪽 손해가 크다.
+check("본문이 안 가리키면 전부 붙인다(되돌림)",
+      used_sources(refuse, [S_TREA]) == [S_TREA],
       repr(used_sources(refuse, [S_TREA])))
-check("옛 규칙(전부 붙이기)이 사라졌다", used_sources("무관한 문장.", [S_SAM, S_HYN]) == [])
+check("무관한 문장이어도 전부 붙는다",
+      used_sources("무관한 문장.", [S_SAM, S_HYN]) == [S_SAM, S_HYN])
 
 print()
 print("=" * 74)
@@ -62,11 +67,15 @@ print("2 — 근거 절이 비면 조회 범위를 적는다")
 print("=" * 74)
 
 out, used = attach_sources(refuse, [S_TREA, S_TREA.replace("0019", "0020")])
-check("출처는 하나도 안 붙는다", used == [], str(used))
-check("근거 절은 그래도 있다", "\n근거\n" in out, repr(out[-90:]))
-check("조회 범위를 적는다", "조회: 삼성전자" in out, repr(out.splitlines()[-1]))
-check("거절이면 '해당 기재 없음'", "해당 기재 없음" in out, repr(out.splitlines()[-1]))
+check("본문이 안 가리켜도 근거가 붙는다", len(used) == 2, str(len(used)))
+check("근거 절이 있다", "\n근거\n" in out, repr(out[-90:]))
+check("조회 범위 줄은 안 쓴다", "조회:" not in out, repr(out.splitlines()[-1]))
 check("본문은 그대로", refuse.split("는")[0] in out)
+
+# sources 가 아예 없을 때 근거 절을 만들지 않는 것은 그대로다
+out_e, used_e = attach_sources(refuse, [])
+check("출처 0건이면 근거 절 없음", "\n근거\n" not in out_e and used_e == [],
+      repr(out_e[-60:]))
 
 line = scope_line([S_SAM, S_HYN], "매출액은 300조다.")
 check("여러 회사를 나열한다", "삼성전자·SK하이닉스" in line, line)
@@ -143,9 +152,10 @@ srcs = [S_TREA, S_TREA.replace("0019", "0020"), S_TREA.replace("0019", "0021")]
 fixed, used3 = attach_sources(strip_boilerplate(REAL), srcs)
 check("상투구가 사라졌다", "관련 기관에 문의" not in fixed, repr(fixed[:160]))
 check("거절 문장은 남았다", "확인되지 않습니다" in fixed)
-check("자기주식 문서가 근거에서 빠졌다", "20250218000019" not in fixed, repr(fixed))
-check("조회 범위가 대신 적혔다", "조회: 삼성전자 주요사항보고서 3건" in fixed,
+# 되돌림 뒤에는 자기주식 문서가 근거에 남는다. **알고 되돌린 부작용이다.**
+check("자기주식 문서가 근거에 남는다(되돌림의 대가)", "20250218000019" in fixed,
       repr(fixed.splitlines()[-1]))
+check("근거 절이 비지 않는다", "\n근거\n" in fixed)
 print()
 print("  --- 고친 뒤 답변 ---")
 for ln in fixed.splitlines():
@@ -193,7 +203,7 @@ finally:
 
 check("조회는 했으므로 무근거 딱지가 없다", not r["unsourced_claim"],
       repr(r["answer"][:70]))
-check("근거 절은 조회 범위로 채워졌다", "조회:" in r["answer"], repr(r["answer"][-70:]))
+check("근거 절에 출처가 붙는다", "20250311001085" in r["answer"], repr(r["answer"][-70:]))
 check("본문 수치는 그대로", "2,357,283,417,485" in r["answer"])
 
 print()
