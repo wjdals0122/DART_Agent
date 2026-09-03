@@ -61,6 +61,8 @@ MAX_RETRY = 3          # 429/5xx 에 대해 지수 백오프
 BACKOFF0 = 2.0
 # 레이트리밋은 서버가 창을 비워 줄 때까지 기다려야 한다. 2초·4초로는 못 넘긴다(실측).
 BACKOFF_429 = 6.0
+# 400 은 서버가 바쁜 게 아니라 요청을 못 알아들은 것이다. 길게 기다릴 이유가 없다.
+BACKOFF_400 = 2.0
 
 _env_loaded = False
 
@@ -190,6 +192,9 @@ def chat(messages, max_tokens: int = 1024, temperature: float = 0.1,
     # "그때 낭비된 토큰" 은 서버가 세었는지 알 수 없으므로 여기서 만들지 않는다.
     delay = BACKOFF0
     n_retry = n_429 = 0
+    # 400 전용 상태. 위 429/5xx 백오프와 섞지 않는다
+    n_400 = 0
+    tools_dropped = False
     wait_s = 0.0
     for attempt in range(MAX_RETRY + 1):
         t0 = time.time()
@@ -201,6 +206,7 @@ def chat(messages, max_tokens: int = 1024, temperature: float = 0.1,
                     "elapsed": round(time.time() - t0, 2),
                     "error": f"요청 실패: {type(e).__name__}: {e}",
                     "retries": n_retry, "retry_429": n_429,
+                    "retry_400": n_400, "tools_dropped": tools_dropped,
                     "retry_wait_s": round(wait_s, 1)}
             if attempt < MAX_RETRY:
                 n_retry += 1
@@ -230,10 +236,53 @@ def chat(messages, max_tokens: int = 1024, temperature: float = 0.1,
                 continue
             return fail
 
+        # ---------------------------------------------------------------- 400
+        #
+        # 【왜 400 에 재시도를 붙였나 — 2026-09-03 실측】
+        # HCX 가 `40009 Unsupported function` 을 산발적으로 낸다. 하루에 세 번 봤다
+        # (e2e_v2 1건 · e2e_v4 1건 · OCI 검증 1건). **같은 질문을 그대로 다시 부르니
+        # 정상이었다.** tools.json 크기 문제도 아니다 — 새 판(5,986자)과 옛 판(5,226자)
+        # 으로 각각 도구를 실어 호출해 보니 둘 다 통과했다.
+        #
+        # 첫 호출에서 400 이 나면 그 문항은 **통째로 잃는다**(도구 0회, 답변은
+        # "공시에서 확인되지 않음"). 40문항에 1건이면 200문항에서 5건이다.
+        #
+        # 【429/5xx 경로와 별개로 둔다】
+        # 위 블록의 `delay` · `n_retry` · `n_429` 를 건드리지 않는다. 400 은 성격이
+        # 다르다 — 서버가 바쁜 게 아니라 요청을 못 알아들은 것이라 백오프를 키울
+        # 이유가 없고, 두 번째에는 **요청 자체를 줄여서** 보낸다.
+        if r.status_code == 400:
+            fail = {"ok": False, "status": 400, "elapsed": elapsed,
+                    "error": f"HTTP 400: {r.text[:500]}",
+                    "retries": n_retry, "retry_429": n_429,
+                    "retry_400": n_400, "tools_dropped": tools_dropped,
+                    "retry_wait_s": round(wait_s, 1)}
+            if attempt < MAX_RETRY:
+                if n_400 == 0:
+                    # 1차 — 같은 payload 로 한 번 더. 산발 오류면 여기서 산다
+                    n_400 = 1
+                    wait_s += BACKOFF_400
+                    time.sleep(BACKOFF_400)
+                    continue
+                if not tools_dropped and ("tools" in body or "toolChoice" in body):
+                    # 2차 — 도구를 떼고 한 번 더. 도구 없이라도 답이 나가는 편이
+                    # 문항을 통째로 잃는 것보다 낫다
+                    tools_dropped = True
+                    body.pop("tools", None)
+                    body.pop("toolChoice", None)
+                    n_400 += 1
+                    wait_s += BACKOFF_400
+                    time.sleep(BACKOFF_400)
+                    continue
+            fail["retry_400"], fail["tools_dropped"] = n_400, tools_dropped
+            fail["retry_wait_s"] = round(wait_s, 1)
+            return fail
+
         if r.status_code != 200:
             return {"ok": False, "status": r.status_code, "elapsed": elapsed,
                     "error": f"HTTP {r.status_code}: {r.text[:500]}",
                     "retries": n_retry, "retry_429": n_429,
+                    "retry_400": n_400, "tools_dropped": tools_dropped,
                     "retry_wait_s": round(wait_s, 1)}
 
         try:
@@ -262,10 +311,12 @@ def chat(messages, max_tokens: int = 1024, temperature: float = 0.1,
                 "finish_reason": result.get("finishReason"),
                 "usage": result.get("usage"),
                 "retries": n_retry, "retry_429": n_429,
+                "retry_400": n_400, "tools_dropped": tools_dropped,
                 "retry_wait_s": round(wait_s, 1)}
 
     return {"ok": False, "error": "재시도 소진", "status": None, "elapsed": 0.0,
-            "retries": n_retry, "retry_429": n_429, "retry_wait_s": round(wait_s, 1)}
+            "retries": n_retry, "retry_429": n_429, "retry_400": n_400,
+            "tools_dropped": tools_dropped, "retry_wait_s": round(wait_s, 1)}
 
 
 def _main() -> int:

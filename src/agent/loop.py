@@ -534,6 +534,9 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
            # est_won 은 입력·출력 단가가 다르므로 총 토큰이 아니라 내역으로 계산한다
            "waste": {"repeat_blocked": 0, "retry_after_bad": 0,
                      "hit_call_limit": False, "http_retry": 0, "retry_429": 0,
+                     # HTTP 400(40009 산발 오류) 재시도 횟수와, 도구를 떼고
+                     # 다시 보냈는지. think_trace 에 그대로 적는다
+                     "retry_400": 0, "tools_dropped": False,
                      "retry_wait_s": 0.0, "resent_prompt_tokens_est": 0,
                      "no_tool_nudge": False, "list_only_nudge": False,
                      "answered_without_tools": False,
@@ -641,6 +644,9 @@ def _account(out: dict, res: dict, model: str, qid) -> None:
 
     w["http_retry"] += row["retries"]
     w["retry_429"] += row["retry_429"]
+    # 400 재시도는 토큰 로그가 아니라 응답 dict 에서 바로 읽는다
+    w["retry_400"] += int(res.get("retry_400") or 0)
+    w["tools_dropped"] = w["tools_dropped"] or bool(res.get("tools_dropped"))
     w["retry_wait_s"] = round(w["retry_wait_s"] + row["retry_wait_s"], 1)
     # 재시도는 같은 본문을 다시 보낸다. 서버가 그것을 과금했는지는 알 수 없으므로
     # '다시 보낸 프롬프트 토큰' 이라는 사실만 추정치로 남기고 비용에는 더하지 않는다.

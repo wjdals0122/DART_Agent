@@ -168,6 +168,13 @@ def render_trace(res: dict) -> str:
         tail.append(res["note"])
     if res.get("unsourced_claim"):
         tail.append("근거 없이 단정한 부분이 있어 답변 앞에 표시를 붙였다")
+    w = res.get("waste") or {}
+    # 400(40009)은 산발 오류다. 몇 번 다시 불렀는지, 도구를 떼고 불렀는지를
+    # 평가자가 볼 수 있게 남긴다 — 답변이 짧아진 이유가 여기 있을 수 있다
+    if w.get("retry_400"):
+        tail.append(f"400 재시도 {w['retry_400']}회")
+    if w.get("tools_dropped"):
+        tail.append("도구 없이 재시도함")
     u = res.get("usage") or {}
     tail.append(f"LLM {u.get('llm_calls', 0)}회 · {res.get('elapsed', 0):.1f}초")
     out.append(f"{n}. 비고: " + " · ".join(tail))
