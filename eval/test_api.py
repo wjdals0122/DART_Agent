@@ -257,7 +257,46 @@ def main() -> int:
     print(f"\n{BAR}\n9 — 그 밖\n{BAR}")
     st, body, _ = call("/nope")
     check("모르는 경로는 404", st == 404, str(st))
-    check("내부 데드라인 50초", loop_mod.DEADLINE == 50.0, str(loop_mod.DEADLINE))
+    # 시간 층위: 주최측 300 > API 하드 240 > 에이전트 소프트 200 > 검문 여유 20
+    check("에이전트 소프트 데드라인 200초", loop_mod.DEADLINE == 200.0,
+          str(loop_mod.DEADLINE))
+    check("API 하드 데드라인 240초", S.HARD_DEADLINE == 240.0, str(S.HARD_DEADLINE))
+    check("하드 > 소프트 (역전 금지)", S.HARD_DEADLINE > loop_mod.DEADLINE)
+    check("주최측 300초보다 짧다", S.HARD_DEADLINE < 300.0)
+    check("검문 여유 20초", loop_mod.AUDIT_MARGIN == 20.0, str(loop_mod.AUDIT_MARGIN))
+
+    print(f"\n{BAR}\n10 — retrieved_context 절단: 문서 단위 · 인용 문서 우선\n{BAR}")
+
+    def fake_doc(i, size):
+        return {"chunk_id": f"c{i}", "corp_name": "가나전자",
+                "report_nm": "사업보고서 (2024.12)", "rcept_no": f"2025010100000{i}",
+                "rcept_dt": "20250101", "section": f"섹션{i}", "note": "",
+                "text": f"문서{i}본문" + ("가" * size)}
+
+    # 40,000자 이하 — 전부 그대로, 생략 표시 없음
+    small = {"documents": [fake_doc(i, 1000) for i in (1, 2, 3)], "answer": ""}
+    ctx = S.render_context(small)
+    check("상한 이하면 전부 들어간다", all(f"문서{i}본문" in ctx for i in (1, 2, 3)))
+    check("상한 이하면 생략 표시 없음", "생략" not in ctx)
+
+    # 15,000자 × 3 = 45,000자 > 40,000 — 인용된 3번을 우선 남긴다
+    big = {"documents": [fake_doc(i, 15_000) for i in (1, 2, 3)],
+           "answer": "값이다 [가나전자 사업보고서, 접수번호 20250101000003]"}
+    ctx = S.render_context(big)
+    check("상한을 넘겼다(원본 기준)", True, f"자름 후 {len(ctx):,}자")
+    check("상한 이내로 잘렸다", len(ctx) <= S.CONTEXT_LIMIT + 200, f"{len(ctx):,}자")
+    check("인용된 문서 3이 살아남는다", "문서3본문" in ctx)
+    check("생략 표시가 붙는다", "생략" in ctx)
+    kept = [i for i in (1, 2, 3) if f"문서{i}본문" in ctx]
+    check("문서 중간에서 끊지 않는다(남은 문서는 본문 전체)",
+          all(("가" * 15_000) in ctx.split(f"문서{i}본문")[1][:15_100] for i in kept),
+          f"남은 문서 {kept}")
+    check("문서 단위로 뺐다(2건만 남는다)", len(kept) == 2, str(kept))
+
+    # 문서 하나가 상한보다 커도 통째로 넣는다 — 중간에서 끊지 않는다
+    huge = {"documents": [fake_doc(1, 50_000)], "answer": ""}
+    ctx = S.render_context(huge)
+    check("단일 초과 문서도 통째로", ("가" * 50_000) in ctx, f"{len(ctx):,}자")
 
     print(f"\n{BAR}")
     if FAIL:

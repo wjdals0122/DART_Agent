@@ -26,7 +26,8 @@ def main() -> int:
     ap.add_argument("--verbose", action="store_true", help="프롬프트 전문도 출력")
     ap.add_argument("--model", default=None)
     ap.add_argument("--max-tool-calls", type=int, default=6)
-    ap.add_argument("--deadline", type=float, default=60.0)
+    # 기본은 loop.DEADLINE(200초). 값을 두 군데서 관리하지 않는다
+    ap.add_argument("--deadline", type=float, default=None)
     ap.add_argument("--qid", default=None,
                     help="토큰 로그에 남길 문항 이름. 없으면 문항 단위 집계에서 빠진다")
     ap.add_argument("--max-cost", type=float, default=None,
@@ -47,7 +48,9 @@ def main() -> int:
         return 2
     print(f"[key] {clova.mask_key(key)} · [model] {clova.resolve_model(a.model)}")
 
-    from src.agent.loop import answer, warmup
+    from src.agent.loop import DEADLINE, answer, warmup
+    if a.deadline is None:
+        a.deadline = DEADLINE
     print("[warmup] 검색 인덱스 올리는 중…", flush=True)
     print(f"[warmup] {warmup():.1f}초 (답변 시간에 포함되지 않는다)")
 

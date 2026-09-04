@@ -9,7 +9,7 @@
   - 판정 함수가 맞는 것만 잡는가(공시에서 베낀 비율은 안 잡는다)
   - 루프가 **딱 한 턴만** 더 도는가. 두 번 이상 돌면 안 된다
   - 추가 턴에서도 같은 상태면 그대로 내보내는가
-  - 남은 시간이 8초 미만이면 검문을 건너뛰는가
+  - 남은 시간이 AUDIT_MARGIN(20초) 미만이면 검문을 건너뛰는가
   - 검문 함수가 어떤 입력에도 예외를 던지지 않는가
 """
 from __future__ import annotations
@@ -476,7 +476,7 @@ check("검문 1·6 이 함께 걸리지 않는다 (검문 1 이 먼저)",
 
 print()
 print("=" * 74)
-print("5 — 남은 시간이 8초 미만이면 검문을 건너뛴다")
+print("5 — 남은 시간이 AUDIT_MARGIN(20초) 미만이면 검문을 건너뛴다")
 print("=" * 74)
 
 state = {"i": 0}
@@ -490,7 +490,7 @@ def fake_slow(messages, **kw):
 
 clova.chat = fake_slow
 try:
-    # deadline 을 아주 작게 주면 남은 시간이 늘 8초 미만이다
+    # deadline 을 아주 작게 주면 남은 시간이 늘 AUDIT_MARGIN 미만이다
     r4 = answer("질문", deadline=1.0)
 finally:
     clova.chat = real_chat

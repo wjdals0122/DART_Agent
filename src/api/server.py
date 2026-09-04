@@ -16,8 +16,11 @@
    5xx 를 뱉으면 재시도 2회를 낭비하고 결국 미응답 처리된다.
    answer 는 최악의 경우에도 "공시에서 확인되지 않음" 으로 채운다.
 
-3. 내부 데드라인 50초(`loop.DEADLINE`). 주최측 60초보다 짧아야 답을 만들어
-   보낼 시간이 남는다. 60초로 두면 답변 생성 도중에 상대가 먼저 끊는다.
+3. 시간 층위(주최측 공지 2026-09-04: "문항 당 응답 대기 시간(타임아웃)은 300초"):
+     주최측 300초 > API 하드 240초(HARD_DEADLINE) > 에이전트 소프트 200초(loop.DEADLINE)
+   소프트 데드라인이 지나면 loop 가 도구 없이 마지막 답변을 받아내고,
+   그래도 240초를 넘기면(비정상 멈춤) 여기서 폴백 응답을 먼저 보낸다.
+   타임아웃에 딱 맞추면 답변 생성 도중에 상대가 먼저 끊는다.
 
 4. 한글 질문은 URL 인코딩돼 온다. `scope["query_string"]` 은 bytes 이므로
    percent-decoding 을 바이트 단계에서 직접 하고 UTF-8 → cp949 순으로 읽는다.
@@ -39,6 +42,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -55,6 +59,19 @@ for _s in (sys.stdout, sys.stderr):
 
 FALLBACK = "공시에서 확인되지 않음"
 FIELDS = ("question_id", "question", "retrieved_context", "think_trace", "answer")
+
+# API 하드 데드라인. 주최측 타임아웃 300초보다 짧아야 응답이 전송될 시간이 남는다.
+# 평소에는 loop 의 소프트 데드라인 200초가 먼저 끝을 내므로 여기까지 오지 않는다 —
+# 이것은 loop 가 비정상적으로 멈췄을 때(네트워크 행 등)의 마지막 방어선이다.
+HARD_DEADLINE = 240.0
+
+# retrieved_context 길이 상한. 공지에 "각 필드의 길이 제한은 없습니다" 라고 했지만
+# 무한정 보내는 것도 의미가 없어 우리 쪽 상한을 둔다. 넘으면 **문서 단위로** 자르고
+# (문서 중간에서 끊지 않는다) 답변 근거 절에 등장하는 접수번호의 문서를 우선 남긴다.
+CONTEXT_LIMIT = 40_000
+
+# 접수번호 14자리. 앞뒤에 숫자가 더 붙으면 접수번호가 아니다(regression.py 와 같은 꼴).
+_RCEPT14 = re.compile(r"(?<!\d)\d{14}(?!\d)")
 
 # 기동 상태. 스레드 하나가 채우고 요청 쪽에서는 읽기만 한다.
 STATE = {
@@ -95,25 +112,61 @@ def start_warmup() -> None:
 # ---------------------------------------------------------------- 응답 만들기
 
 
+def _doc_block(d: dict) -> str:
+    """문서 하나의 본문 블록. [문서N] 번호는 조립 때 붙인다(선별 뒤 번호가 바뀐다)."""
+    head = f"{d.get('corp_name', '')} {d.get('report_nm', '')}"
+    if d.get("rcept_no"):
+        head += f", 접수번호 {d['rcept_no']}"
+    line = [head]
+    if d.get("section"):
+        line.append(f"섹션: {d['section']}")
+    if d.get("note"):
+        line.append(f"참고: {d['note']}")
+    line.append("")
+    line.append((d.get("text") or "").strip())
+    return "\n".join(line)
+
+
 def render_context(res: dict) -> str:
-    """검색이 올린 청크를 문서별로 이어 붙인다."""
+    """검색이 올린 청크를 문서별로 이어 붙인다. CONTEXT_LIMIT 를 넘으면 문서 단위로 자른다.
+
+    【자르는 규칙】
+    - 문서 중간에서 끊지 않는다. 문서를 통째로 넣거나 통째로 뺀다
+    - 답변(근거 절 포함)에 등장하는 접수번호의 문서를 우선 남긴다 —
+      근거로 인용된 문서가 retrieved_context 에 없으면 평가자가 검증할 수 없다
+    - 첫 문서 하나가 상한보다 커도 통째로 넣는다(공지상 필드 길이 제한은 없다)
+    - 뺀 문서 수는 끝에 한 줄로 밝힌다. 조용히 사라지게 두지 않는다
+    """
     docs = res.get("documents") or []
     if not docs:
         return "검색된 문서 없음"
-    parts = []
-    for i, d in enumerate(docs, 1):
-        head = f"[문서{i}] {d.get('corp_name', '')} {d.get('report_nm', '')}"
-        if d.get("rcept_no"):
-            head += f", 접수번호 {d['rcept_no']}"
-        line = [head]
-        if d.get("section"):
-            line.append(f"섹션: {d['section']}")
-        if d.get("note"):
-            line.append(f"참고: {d['note']}")
-        line.append("")
-        line.append((d.get("text") or "").strip())
-        parts.append("\n".join(line))
-    return "\n---\n".join(parts)
+    blocks = [_doc_block(d) for d in docs]
+    sep = "\n---\n"
+
+    def assemble(keep_idx: list, dropped: int) -> str:
+        parts = [f"[문서{n}] {blocks[j]}"
+                 for n, j in enumerate(keep_idx, 1)]
+        if dropped:
+            parts.append(f"(길이 제한 {CONTEXT_LIMIT:,}자를 넘어 문서 {dropped}건 생략 — "
+                         "조회 내역은 think_trace 참조)")
+        return sep.join(parts)
+
+    full = assemble(list(range(len(blocks))), 0)
+    if len(full) <= CONTEXT_LIMIT:
+        return full
+
+    # 답변이 가리킨 접수번호의 문서 먼저, 나머지는 원래 순서대로
+    cited = set(_RCEPT14.findall(res.get("answer") or ""))
+    pri = [i for i, d in enumerate(docs) if str(d.get("rcept_no") or "") in cited]
+    rest = [i for i in range(len(docs)) if i not in set(pri)]
+    keep: set = set()
+    total = 0
+    for i in pri + rest:
+        cost = len(blocks[i]) + len(sep) + 10          # 번호 머리말 여유분
+        if not keep or total + cost <= CONTEXT_LIMIT:  # 첫 문서는 커도 넣는다
+            keep.add(i)
+            total += cost
+    return assemble(sorted(keep), len(docs) - len(keep))
 
 
 def render_trace(res: dict) -> str:
@@ -192,9 +245,36 @@ def make_answer(question_id: str, question: str) -> dict:
                          "question 파라미터에 질의 내용을 넣어 다시 요청해 주세요.")
         return out
     try:
-        from src.agent.loop import answer
+        # 【하드 데드라인 — 워커 스레드 + join(HARD_DEADLINE)】
+        # loop 의 소프트 데드라인(200초)이 정상 경로의 끝이다. 여기는 loop 가
+        # 그마저 못 지키고 멈춰 있을 때(네트워크 행 등) 주최측 300초 타임아웃 전에
+        # 폴백이라도 보내는 장치다. 시간을 넘긴 스레드는 daemon 이라 그대로 두면
+        # 알아서 끝난다 — 평가는 순차 호출이라 다음 문항과 겹칠 일이 거의 없다.
+        box: dict = {}
 
-        res = answer(question, qid=question_id or None)
+        def _work() -> None:
+            try:
+                from src.agent.loop import answer
+
+                box["res"] = answer(question, qid=question_id or None)
+            except BaseException as e:         # noqa: BLE001 — 본 스레드로 넘긴다
+                box["err"] = e
+
+        th = threading.Thread(target=_work, name="answer", daemon=True)
+        th.start()
+        th.join(HARD_DEADLINE)
+        if th.is_alive():
+            out["think_trace"] = (f"1. 내부 하드 데드라인 {HARD_DEADLINE:.0f}초를 넘겨 "
+                                  "답변 생성을 중단하고 폴백을 보냈다")
+            out["retrieved_context"] = "검색된 문서 없음"
+            out["answer"] = FALLBACK
+            for k in FIELDS:
+                out[k] = "" if out.get(k) is None else str(out[k])
+            return out
+        if "err" in box:
+            raise box["err"]
+
+        res = box["res"]
         out["retrieved_context"] = render_context(res)
         out["think_trace"] = render_trace(res)
         out["answer"] = (res.get("answer") or "").strip() or FALLBACK

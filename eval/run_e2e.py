@@ -753,9 +753,13 @@ def main() -> int:
     ap.add_argument("--sleep", type=float, default=DEFAULT_SLEEP,
                     help=f"문항 사이 대기 초. 429 때문에 기본 {DEFAULT_SLEEP:.0f}")
     ap.add_argument("--model", default=None)
-    ap.add_argument("--deadline", type=float, default=60.0)
+    # 기본은 loop.DEADLINE(200초). 값을 두 군데서 관리하지 않는다
+    ap.add_argument("--deadline", type=float, default=None)
     ap.add_argument("--max-tool-calls", type=int, default=6)
     a = ap.parse_args()
+    if a.deadline is None:
+        from src.agent.loop import DEADLINE
+        a.deadline = DEADLINE
 
     items, warn = load_items()
     for m in warn:

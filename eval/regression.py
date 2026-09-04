@@ -19,7 +19,9 @@
   - 답변에 '근거' 절이 있는가
   - 근거에 접수번호 14자리(8자리 접수일 + 6자리 일련번호)가 있는가
   - 도구 호출이 6회 이하인가          (loop.MAX_TOOL_CALLS)
-  - 소요시간이 42초 이하인가          (주최측 60초 - 여유 18초)
+  - 소요시간이 240초 이하인가         (주최측 타임아웃 300초 - 전송 여유.
+                                       API 하드 데드라인과 같은 값. 소요시간 자체는
+                                       계속 기록하므로 분포는 리포트에서 본다)
 
 6번(거절 문항)은 근거를 달 것이 없어 접수번호 검사에서 떨어질 수 있다.
 그건 기준선에 FAIL 로 적히고 그대로 둔다. **기준선은 '지금 상태' 이지 '목표' 가 아니다.**
@@ -49,7 +51,9 @@ LAST_MD = REPORTS / "regression_last.md"
 # 429 는 이 프로젝트에서 가장 흔한 실패다. 연속 호출 사이 20초(run_e2e 와 같은 값).
 DEFAULT_SLEEP = 20.0
 MAX_TOOL_CALLS = 6
-MAX_SECONDS = 42.0
+# 주최측 공지 "문항 당 응답 대기 시간(타임아웃)은 300초" · API 하드 데드라인 240초.
+# (옛 값 42.0 은 "60초 이내" 옛 명세 기준이었다)
+MAX_SECONDS = 240.0
 
 # 접수번호 14자리. 앞뒤에 숫자가 더 붙으면 접수번호가 아니다.
 _RCEPT = re.compile(r"(?<!\d)\d{14}(?!\d)")
@@ -194,7 +198,7 @@ def common_checks(a: str, r: dict) -> list:
     out.append(("접수번호", bool(_RCEPT.search(a)), "접수번호 14자리 없음"))
     out.append(("도구≤6", r["n_tool_calls"] <= MAX_TOOL_CALLS,
                 f"도구 {r['n_tool_calls']}회"))
-    out.append(("≤42초", r["elapsed"] <= MAX_SECONDS, f"{r['elapsed']:.1f}초"))
+    out.append(("≤240초", r["elapsed"] <= MAX_SECONDS, f"{r['elapsed']:.1f}초"))
     return out
 
 
@@ -261,7 +265,7 @@ def run(cases: list, sleep: float, model, deadline: float) -> list:
 
 def table(rows: list, base: dict | None) -> str:
     L = []
-    head = ["#", "문항", "내용", "근거절", "접수번호", "도구≤6", "≤42초", "판정"]
+    head = ["#", "문항", "내용", "근거절", "접수번호", "도구≤6", "≤240초", "소요", "판정"]
     if base:
         head.append("기준선 대비")
     head.append("사유")
@@ -273,7 +277,8 @@ def table(rows: list, base: dict | None) -> str:
         mark = lambda b: "O" if b else "X"          # noqa: E731
         cells = [str(r["n"]), r["name"], mark(r["content_ok"]),
                  mark(cm["근거절"]), mark(cm["접수번호"]),
-                 mark(cm["도구≤6"]), mark(cm["≤42초"]),
+                 mark(cm["도구≤6"]), mark(cm["≤240초"]),
+                 f"{r['elapsed']:.1f}초",       # 상한을 올려도 분포는 계속 본다
                  "**PASS**" if r["pass"] else "**FAIL**"]
         if base:
             was = base.get(str(r["n"]))
@@ -350,8 +355,12 @@ def main() -> int:
     ap.add_argument("--sleep", type=float, default=DEFAULT_SLEEP,
                     help="문항 사이 대기(초). 429 방지")
     ap.add_argument("--model", default=None)
-    ap.add_argument("--deadline", type=float, default=50.0)
+    # 기본은 loop.DEADLINE(200초)을 그대로 쓴다 — 값을 두 군데서 관리하지 않는다
+    ap.add_argument("--deadline", type=float, default=None)
     a = ap.parse_args()
+    if a.deadline is None:
+        from src.agent.loop import DEADLINE
+        a.deadline = DEADLINE
 
     cases = [c for c in CASES if c["quick"]] if a.quick else CASES
     print(f"[회귀] {len(cases)}문항" + (" (--quick: 1·3·5)" if a.quick else ""))
