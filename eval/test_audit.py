@@ -284,6 +284,12 @@ check("자리표시자 누출을 잡는다",
 check("'죄송합니다…수정된 답변' 어두를 잡는다 — step40 실측",
       loop.audit_degraded("죄송합니다. 제가 제공한 답변에 오류가 있었습니다. "
                           "다음은 수정된 답변입니다.", PREV))
+check("'아직 조회하지 않은 하위 질문' 누출을 잡는다 — step44-D 실측",
+      loop.audit_degraded("아직 조회하지 않은 하위 질문들에 대한 답변은 "
+                          "다음과 같습니다.", PREV))
+check("'아래와 같이 수정' 도 잡는다",
+      loop.audit_degraded("아래와 같이 수정하였습니다.", PREV))
+check("'다시 답변' 도 잡는다", loop.audit_degraded("다시 답변드리겠습니다.", PREV))
 check("근거가 사라지면 잡는다",
       loop.audit_degraded("계약금액은 644억원이다.", PREV))
 check("멀쩡히 고친 답변은 안 잡는다",
