@@ -210,6 +210,26 @@ def main() -> int:
         check(f"  {tool} 대안을 말한다",
               "회사명과 날짜" in (out.get("note") or ""))
 
+    # query 없이 부른 경우의 안내 — 문구가 조용히 빈약해지지 않게 못박는다
+    #
+    # 이 note 는 한 번 강화한 적이 있다(주석 참고: "query 가 비어 있다" 만 돌려줬을 때
+    # 모델이 재시도 없이 포기했다). 그 뒤로도 회귀 3번이 query 없이 부르고
+    # 재호출 대신 답변을 끝낸 사례가 있어(step27 변형 ③), 문구를 검사로 고정한다.
+    print("\n--- query 누락 안내 ---")
+    from src.tools import EMPTY_QUERY_NOTE  # noqa: E402
+
+    for kw in ({}, {"query": None}, {"query": ""}, {"query": "   "},
+               {"corp_name": "KB금융", "fiscal_year": 2025}):
+        out = TOOLS["search_disclosure"](**kw)
+        check(f"  {str(kw)[:38]} → error", out.get("status") == "error",
+              str(out.get("status")))
+        check(f"  {str(kw)[:38]} → 안내 문구", out.get("note") == EMPTY_QUERY_NOTE)
+    check("  무엇이 빠졌는지 말한다", "query" in EMPTY_QUERY_NOTE)
+    check("  다시 호출하라고 말한다", "다시 호출" in EMPTY_QUERY_NOTE)
+    check("  검색어를 넣으라고 말한다", "검색어를 넣" in EMPTY_QUERY_NOTE)
+    check("  예시를 준다", "예:" in EMPTY_QUERY_NOTE and "'" in EMPTY_QUERY_NOTE,
+          EMPTY_QUERY_NOTE)
+
     # rcept_dt + fiscal_year — 어떤 문서에서는 구조적으로 0건이다
     #
     # 회귀 7번이 두 번 연속 fiscal_year=2024 + rcept_dt="20240130" 을 넣어 후보 0건을
