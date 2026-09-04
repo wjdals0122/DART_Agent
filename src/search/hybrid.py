@@ -35,7 +35,7 @@ import pandas as pd
 
 from src.eval.chunk_store import ChunkStore
 from src.index import paths
-from src.search.aliases import resolve_company
+from src.search.aliases import generic_name_hint, resolve_company
 from src.search.bm25 import BM25
 
 MASK = paths.ROOT / "data" / "index" / "latest_mask.npz"
@@ -478,8 +478,14 @@ class Retriever:
         if corp_name:
             r = resolve_company(corp_name)
             if r["status"] == "not_found":
-                return {**empty, "status": "not_found",
-                        "note": f"코퍼스 70개사에 '{corp_name}' 이 없다"}
+                note = f"코퍼스 70개사에 '{corp_name}' 이 없다"
+                # '전체' 류 낱말이면 corp_name 을 빼라는 해결책을 덧붙인다.
+                # 판단은 aliases.generic_name_hint 한 곳에서만 한다 — 두 곳에서
+                # 따로 판단하면 안내가 갈리고, 갈린 안내는 모델이 못 고친다.
+                hint = generic_name_hint(corp_name)
+                if hint:
+                    note += " · " + hint
+                return {**empty, "status": "not_found", "note": note}
             if r["status"] == "ambiguous":
                 return {**empty, "status": "ambiguous", "candidates": r["candidates"],
                         "note": r.get("note", "회사가 특정되지 않는다")}

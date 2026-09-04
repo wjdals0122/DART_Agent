@@ -137,6 +137,18 @@ def main() -> int:
     r = TOOLS["list_disclosures"](corp_name="KB금융", series_of="20260619000667")
     check("자기 회사 계열은 그대로 동작한다(회귀)",
           r["status"] == "ok" and r["total"] == 3)
+    # corp_name='전체' — 실측(2026-09-04)에서 이 경로로 0건 2회 뒤 답을 포기했다.
+    # search_disclosure(→hybrid) 표면에서도 해결책 안내가 붙는지 본다.
+    r = TOOLS["search_disclosure"](query="연결 기준 영업이익", corp_name="전체",
+                                   fiscal_year=2024)
+    print(f"   note={r['note']}")
+    check("corp_name='전체' 는 not_found + 'corp_name 을 빼고' 안내",
+          r["status"] == "not_found" and "corp_name 을 빼고" in r["note"])
+    check("기존 note(70개사에 없다)도 남는다", "코퍼스 70개사에 '전체'" in r["note"])
+    r = TOOLS["search_disclosure"](query="연결 기준 영업이익", corp_name="삼성전제")
+    check("오타 회사명에는 그 안내가 안 붙는다",
+          r["status"] == "not_found" and "corp_name 을 빼고" not in r["note"],
+          r["note"][:60])
 
     print(f"\n{BAR}\n7-b — doc_group · 목록→본문 안내\n{BAR}")
     r = TOOLS["list_disclosures"](corp_name="두산퓨얼셀", doc_group="exchange",

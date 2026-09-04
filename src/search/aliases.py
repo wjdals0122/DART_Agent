@@ -179,7 +179,41 @@ def resolve_company(name: str) -> dict:
                 "candidates": [_card(comps[i]) for i in rev],
                 "note": f"질의에 여러 회사명이 포함됨 ({len(rev)}곳)"}
 
-    return {"status": "not_found", "query": name, "note": "코퍼스 70개사에 없다"}
+    note = "코퍼스 70개사에 없다"
+    hint = generic_name_hint(name)
+    if hint:
+        note += " · " + hint
+    return {"status": "not_found", "query": name, "note": note}
+
+
+# corp_name 자리에 회사가 아니라 '전체 회사' 를 뜻하는 낱말이 오는 경우 — 2026-09-04 실측.
+# 모델이 corp_name='전체' 로 검색해 0건을 두 번 받고 답을 포기했다. note 가
+# "없다" 만 말하면 모델은 필터를 뺄 생각을 못 한다. 해결책은 못 찾은 값
+# 바로 옆에서 말해야 먹힌다(이 리포의 교훈 — 도구 결과에 실은 안내가 프롬프트보다 강하다).
+#
+# 【못 찾은 값에만 붙는다】 이 함수는 not_found 경로에서만 불린다. 오타·미수록
+# 회사명에 붙으면 "회사를 특정하지 마라" 가 거짓 안내가 된다 — 그때는 특정이 맞다.
+# 참고: '회사' 하나만은 실측으로 not_found 가 아니라 신한지주 부분 일치("…지주회사")로
+# 흡수되므로 여기 낱말에 있어도 단독으로는 이 안내를 받지 못한다.
+_GENERIC_WORDS = ("전종목", "미지정", "상장사", "전체", "전부", "모든", "모두",
+                  "기업", "회사", "all")
+
+
+def generic_name_hint(name: str) -> str:
+    """'전체' 류 낱말(또는 그 조합)이면 corp_name 을 빼라는 안내를, 아니면 빈 문자열.
+
+    normalize 가 공백·대소문자를 지우므로 '전 종목'·'ALL'·'모든 회사' 도 잡힌다.
+    낱말을 걷어내고 글자가 남으면 오타·미수록 회사일 수 있으므로 붙이지 않는다.
+    """
+    q = normalize(name)
+    if not q:
+        return ""
+    for w in _GENERIC_WORDS:
+        q = q.replace(w, "")
+    if q:
+        return ""
+    return (f"'{name}'은 회사명이 아니다. 회사를 특정하지 않고 찾으려면 "
+            "corp_name 을 빼고 호출하라. 그러면 70개사 전체에서 검색된다.")
 
 
 def all_companies() -> list[dict]:

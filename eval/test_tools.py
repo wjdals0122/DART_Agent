@@ -288,6 +288,43 @@ def main() -> int:
               sum(no_fy.values()) == 3150, str(sum(no_fy.values())))
         check(f"  전체 {tot:,} 가 note 의 4,204 와 같다", tot == 4204, str(tot))
 
+    # corp_name 이 회사가 아니라 '전체' 류 낱말인 경우 — 해결책 안내
+    #
+    # 실측(2026-09-04): 모델이 corp_name='전체' 로 검색해 0건을 두 번 받고 답을
+    # 포기했다. note 가 "없다" 만 말하면 필터를 뺄 생각을 못 한다.
+    # 오타·미수록 회사에는 붙으면 안 된다 — 그때는 회사를 특정하는 게 맞다.
+    print("\n--- corp_name='전체' 류 해결책 안내 ---")
+    HINT_KEY = "corp_name 을 빼고"
+    generic = ["전체", "전부", "모든", "모두", "전 종목", "상장사", "기업",
+               "all", "미지정"]
+    for g in generic:
+        r = TOOLS["resolve_company"](name=g)
+        check(f"  '{g}' → not_found + 안내가 붙는다",
+              r["status"] == "not_found" and HINT_KEY in r["note"],
+              f"{r['status']} · {r['note'][:60]}")
+    # '회사' 는 못 찾은 값이 아니다 — 신한지주 별칭("…지주회사")에 부분 일치로
+    # 흡수된다(실측). not_found 가 아니므로 이 안내의 대상이 아니다.
+    r = TOOLS["resolve_company"](name="회사")
+    check("  '회사' 는 not_found 가 아니다(부분 일치 흡수 — 안내 대상 밖)",
+          r["status"] != "not_found", f"{r['status']} · {r.get('corp_name')}")
+    for bad_name in ("삼성전제", "구글코리아", "한국조선해양"):
+        r = TOOLS["resolve_company"](name=bad_name)
+        check(f"  오타·미수록 '{bad_name}' 에는 안 붙는다",
+              r["status"] == "not_found" and HINT_KEY not in r["note"],
+              f"{r['status']} · {r['note'][:60]}")
+    # 기존 note 를 지우지 않고 뒤에 덧붙인다
+    r = TOOLS["resolve_company"](name="전체")
+    check("  기존 note('코퍼스 70개사에 없다')가 앞에 남아 있다",
+          r["note"].startswith("코퍼스 70개사에 없다"), r["note"][:60])
+    check("  값이 따옴표로 들어간다", "'전체'" in r["note"], r["note"][:80])
+    # 조합·표기 변형도 잡는다 (normalize 가 공백·대소문자를 지운다)
+    from src.search.aliases import generic_name_hint
+    for combo in ("모든 회사", "전체 기업", "ALL"):
+        check(f"  조합 '{combo}' 도 잡는다", bool(generic_name_hint(combo)), combo)
+    check("  실제 회사명에는 빈 문자열", generic_name_hint("삼성전자") == "")
+    check("  일부만 겹치면 안 붙는다 ('국내 상장사')",
+          generic_name_hint("국내 상장사") == "")
+
     # tools.json 이 스키마로서 말이 되는지
     print("\n--- tools.json ---")
     cfg = json.loads((ROOT / "config" / "tools.json").read_text(encoding="utf-8"))
