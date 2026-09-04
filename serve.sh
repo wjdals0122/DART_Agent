@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ★★ 경고(2026-09-04): 운영 서버는 systemd 로 관리한다. 직접 실행하면
+#    dis044.service 가 이미 80 포트를 잡고 있어 포트 충돌이 난다.
+#    재기동은  systemctl restart dis044  을 쓰라. (deploy.sh 도 그렇게 한다)
+#    이 파일은 systemd 가 없는 환경(로컬 시험 등)용으로만 남겨 둔다.
+#
 # 평가용 API 서버 기동 — nohup 으로 백그라운드.
 #
 #   bash serve.sh          기동 (PORT 기본 80)

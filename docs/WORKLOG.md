@@ -5468,3 +5468,31 @@ e2e 40문항(사람 240에서 표집)에도 당연히 0건.
 검문 5 확장 4(발동 2·미발동 2, test_audit) · 검문 4 확장 4(발동 2·미발동 2,
 test_audit) · BOILERPLATE 5(지움 3·남김 2, test_sources).
 회귀는 지시대로 안 돌렸다 — e2e 와 함께 본다.
+
+---
+
+## step34 — deploy.sh 를 systemd 재기동으로 (2026-09-04) · LLM 0회
+
+서버는 이제 systemd(dis044.service, 서버에만 있고 리포에는 없다)가 관리한다.
+deploy.sh 가 serve.sh 를 또 띄우다 "address already in use" 로 실패했다(실측).
+
+### 한 일
+
+- `scripts/deploy.sh` 재기동부: `serve.sh stop`+`serve.sh` → **`systemctl restart
+  dis044`**. 준비 대기는 `systemctl is-active`(죽으면 즉시 중단) + `/health` 폴링
+  (200 + `"status": "ok"`) 둘 다. 실패 세 갈래(restart 실패 / 프로세스 사망 /
+  120초 타임아웃) 모두 `journalctl -u dis044 -n 40 --no-pager` 를 찍는다
+- `serve.sh` 는 지우지 않고 맨 위에 경고 주석 — systemd 로 관리, 직접 실행 시
+  포트 충돌, `systemctl restart dis044` 을 쓰라. 로컬 시험용으로만 남긴다
+- **덤으로 잡은 잠복 버그**: 옛 준비 판정 `grep '"ready": *true'` 는 `/health`
+  응답에 **없는 키**였다 — 서버가 정상이어도 120초를 다 기다려 exit 1 이 났을
+  코드다. 실제 응답(`"status": "ok"`)으로 고쳤다
+
+### 검증 (LLM 0회 · 실배포는 사람이)
+
+- `bash -n` — deploy.sh · serve.sh · REMOTE_SCRIPT 본문(추출) 전부 문법 OK
+- 가짜 systemctl/journalctl/curl 로 REMOTE_SCRIPT 세 갈래 실행:
+  정상 → "준비됐다" exit 0 / restart 실패 → journalctl + exit 1 /
+  is-active 실패 → journalctl + exit 1
+- `/health` 실제 응답과 grep 이 맞는지 파이썬으로 확인 —
+  ready 시 200 `{"status": "ok", …}` 매칭 True, 준비 전 503 `{"status": "starting"}`
