@@ -113,10 +113,9 @@ def build_prompt() -> str:
         "- 법인명 목록 (companies 에는 이 표기만 쓴다):",
         "  " + _corp_names(),
         "",
-        "[출력 JSON — 이 7개 키를 전부 넣는다]",
+        "[출력 JSON — 이 6개 키를 전부 넣는다]",
         '{"rewritten": "질문을 명확하게 다시 쓴 문장", "sub_questions": ["..."],',
-        ' "companies": [], "fiscal_years": [], "doc_groups": [],',
-        ' "time_note": "", "out_of_scope": false}',
+        ' "companies": [], "fiscal_years": [], "doc_groups": [], "time_note": ""}',
         "",
         "[규칙]",
         "- rewritten: 상대 시점을 절대 시점으로, 축약 회사명을 정식 법인명으로,",
@@ -144,9 +143,8 @@ def build_prompt() -> str:
         "  **내용으로 추정하지 마라.** 소송·재무·이사회가 어디 실리는지 짐작해서",
         "  채우면 안 된다 — 실제로 유형을 좁혔다가 정답 문서를 놓친 사례가 있다.",
         "  확신이 없으면 빈 배열 [] 로 둔다",
-        "- out_of_scope: 질문이 과거 사건을 언급해도 그 사건은 2023~2026 보고서에",
-        "  기재될 수 있다. out_of_scope 는 질문이 \"2022년 이전 보고서의 값\"을",
-        "  명시적으로 요구할 때만 true",
+        "- 질문이 과거 사건을 언급해도 그 사건은 2023~2026 보고서에 기재될 수 있다.",
+        "  범위 밖이라고 스스로 판정하지 마라 — 범위 판단은 검색 결과가 한다",
         "- 확신이 없으면 비워라. 추측해 채우지 마라",
         "",
         # 규칙 문장보다 예시가 잘 먹힌다(이 리포의 반복된 교훈). 실측으로
@@ -158,7 +156,7 @@ def build_prompt() -> str:
         '가장 최근 회계연도(2025년) 실적이 가장 좋은 회사는 어디인가?"], '
         '"companies": [], "fiscal_years": [2025], "doc_groups": [], '
         '"time_note": "\'요즘\'을 코퍼스 최신 접수분(2026.03)에 담긴 2025 '
-        '회계연도로 해석", "out_of_scope": false}',
+        '회계연도로 해석"}',
         "",
         "[예시 2 — 질문: \"2023년 매출 1위는? 그리고 삼성전자의 2023년 배당은?\"]",
         "(질문 둘 혼합 · 명시된 연도는 그대로 · 매출·배당·정정공시처럼 **내용**만",
@@ -167,7 +165,7 @@ def build_prompt() -> str:
         '회계연도 배당 내용을 묻는다", "sub_questions": ["2023 회계연도 매출액이 '
         '가장 큰 회사는 어디인가?", "삼성전자의 2023 회계연도 배당은 어떠했는가?"], '
         '"companies": ["삼성전자"], "fiscal_years": [2023], "doc_groups": [], '
-        '"time_note": "", "out_of_scope": false}',
+        '"time_note": ""}',
         "",
         "예시의 회사·연도를 베끼지 마라 — 베낄 것은 **모양**이지 값이 아니다.",
         "위 예시처럼 **JSON 하나만** 출력한다. 설명·머리말·꼬리말·마크다운·굵은",
@@ -283,6 +281,9 @@ def rewrite_question(question, model=None, budget_s=None) -> dict:
         # 기수는 rewritten 문장에 남아 검색어로 흘러간다.
         a["fiscal_years"] = [y for y in (a.get("fiscal_years") or []) if y >= 1900]
         a["ki"] = []
+        # 【step44-E 되돌림】 out_of_scope 오판이 도구 0회 거절을 만들었다(v6 1·9).
+        # 필드는 프롬프트에서 뺐고, 남아 들어와도 무시한다 — 범위 판단은 검색이 한다.
+        a["out_of_scope"] = False
         out["ok"], out["analysis"] = True, a
         return out
     except Exception as e:                     # noqa: BLE001 — 마지막 방어선
@@ -318,8 +319,6 @@ def analysis_block(a: dict) -> str:
             L.append("- 공시 종류: " + "·".join(a["doc_groups"]))
         if a.get("time_note"):
             L.append(f"- 시점 해석: {a['time_note']}")
-        if a.get("out_of_scope"):
-            L.append("- 주의: 질문 시점이 코퍼스 범위(2023.01~2026.03) 밖일 수 있다")
         L.append("- 이 분석은 참고용이다. 검색 결과가 다르면 검색 결과를 따른다")
         return "\n".join(L)
     except Exception:                          # noqa: BLE001 — 블록 조립이 답을 막으면 안 된다
