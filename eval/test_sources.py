@@ -21,6 +21,11 @@ for _s in (sys.stdout, sys.stderr):
     if hasattr(_s, "reconfigure"):
         _s.reconfigure(encoding="utf-8", errors="replace")
 
+import os  # noqa: E402
+
+# 후처리(근거 절)만 시험한다 — 재작성 단계가 켜지면 answer() 경로의 턴 수가 밀린다
+os.environ["DART_REWRITE"] = "0"
+
 from src.agent.loop import (attach_sources, scope_line,  # noqa: E402
                             strip_boilerplate, used_sources)
 

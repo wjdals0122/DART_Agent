@@ -175,16 +175,36 @@ def render_trace(res: dict) -> str:
     n = 1
     out = []
 
-    corp = next((c["arguments"].get("corp_name") for c in calls
-                 if isinstance(c.get("arguments"), dict)
-                 and c["arguments"].get("corp_name")), None)
-    year = next((c["arguments"].get("fiscal_year") for c in calls
-                 if isinstance(c.get("arguments"), dict)
-                 and c["arguments"].get("fiscal_year")), None)
-    bits = [x for x in (corp, f"{year} 사업연도" if year else None) if x]
-    out.append(f"{n}. 질문 분석: " + (", ".join(bits) if bits
-                                    else "회사·시점을 특정하지 못했다"))
-    n += 1
+    # 질문 재작성 단계가 있으면 그 결과를, 없으면(옛 경로·가짜 응답) 도구 인자에서
+    # 뽑은 요약을 첫 줄로 쓴다. 생략됐으면 사유를 밝힌다 — 조용히 사라지지 않는다.
+    rw = res.get("rewrite")
+    if isinstance(rw, dict) and rw.get("ok") and (rw.get("analysis") or {}):
+        a = rw["analysis"]
+        bits = []
+        if a.get("rewritten"):
+            bits.append(f'재작성 "{a["rewritten"]}"')
+        if a.get("companies"):
+            bits.append("회사 " + "·".join(a["companies"]))
+        if a.get("fiscal_years"):
+            bits.append("회계연도 " + "·".join(str(y) for y in a["fiscal_years"]))
+        if a.get("time_note"):
+            bits.append(f"시점 해석: {a['time_note']}")
+        out.append(f"{n}. 질문 분석: " + (" · ".join(bits) or "특이사항 없음"))
+        n += 1
+    elif isinstance(rw, dict):
+        out.append(f"{n}. 질문 분석 생략({rw.get('note') or '사유 미상'})")
+        n += 1
+    else:
+        corp = next((c["arguments"].get("corp_name") for c in calls
+                     if isinstance(c.get("arguments"), dict)
+                     and c["arguments"].get("corp_name")), None)
+        year = next((c["arguments"].get("fiscal_year") for c in calls
+                     if isinstance(c.get("arguments"), dict)
+                     and c["arguments"].get("fiscal_year")), None)
+        bits = [x for x in (corp, f"{year} 사업연도" if year else None) if x]
+        out.append(f"{n}. 질문 분석: " + (", ".join(bits) if bits
+                                        else "회사·시점을 특정하지 못했다"))
+        n += 1
 
     if not calls:
         why = res.get("note") or "도구를 부르지 않고 답할 수 있다고 판단했다"

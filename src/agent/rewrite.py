@@ -1,0 +1,262 @@
+"""질문 재작성(사전 분석) — 에이전트 루프 맨 앞의 LLM 1회.
+
+  from src.agent.rewrite import rewrite_question
+  rw = rewrite_question("한화오션의 작년 정정공시 내용 알려줘")
+  # {"ok": True, "analysis": {...}, "note": "", "res": <clova 응답>, "elapsed": 4.2}
+
+【왜 필요한가 — 2026-09-04 실측】
+실패 원인 다수가 "질문을 도구 인자로 옮기는" 단계의 실수였다:
+  - 회사명을 query 에만 넣고 corp_name 을 비움 (후보 145,510)
+  - rcept_dt 에 최초 신고일을 못 박아 정정공시가 빠짐
+  - fiscal_year 와 rcept_dt 를 함께 걸어 구조적 0건
+  - corp_name='전체'
+그리고 "올해·작년·최근" 같은 상대 시점이 해석되지 않는다.
+
+【계약 — 어떤 경우에도 지킨다】
+- `rewrite_question()` 은 **예외를 던지지 않는다.** LLM 실패(400/429/타임아웃)·
+  JSON 파싱 실패·시간 초과 전부 {"ok": False, "note": 사유} 로 돌아온다.
+  부르는 쪽(loop)은 ok=False 면 이 단계를 통째로 건너뛰고 지금과 똑같이 진행한다.
+- 재작성에 `REWRITE_BUDGET_S`(15초) 이상 걸리면 **결과를 버린다.**
+  (429 백오프가 길어지면 시간 자체는 이미 쓴 뒤다 — clova.chat 에 재시도 조절
+  손잡이가 없어 지출을 막지는 못하고, 낡은 분석을 쓰는 것만 막는다)
+- 분석은 **힌트다.** 도구 인자를 코드가 강제로 채우지 않는다. out_of_scope 여도
+  검색을 막지 않는다. 시스템 프롬프트의 [질문 분석] 블록으로만 전달한다.
+- API 응답의 question 필드에는 언제나 **원문**이 들어간다. 재작성문을 넣으면
+  주최측 규격 위반이다(테스트로 못박음 — eval/test_rewrite.py).
+"""
+from __future__ import annotations
+
+import json
+import re
+import sys
+import time
+import traceback
+
+REWRITE_BUDGET_S = 15.0
+MAX_TOKENS = 1024
+
+# 출력 JSON 의 키와 기본값. 이 모양 밖의 키는 버린다.
+_DEFAULTS = {
+    "rewritten": "",
+    "sub_questions": [],
+    "companies": [],
+    "fiscal_years": [],
+    "doc_groups": [],
+    "time_note": "",
+    "out_of_scope": False,
+}
+
+_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.M)
+
+
+def _corp_names() -> str:
+    """코퍼스 70개사 법인명. 못 읽어도 재작성은 진행한다(목록 없이)."""
+    try:
+        from src.search.aliases import all_companies
+        return " · ".join(c["corp_name"] for c in all_companies())
+    except Exception:                          # noqa: BLE001 — 목록은 보조 정보다
+        traceback.print_exc(file=sys.stderr)
+        return "(목록을 읽지 못했다 — 질문에 적힌 회사명을 그대로 쓴다)"
+
+
+def build_prompt() -> str:
+    return "\n".join([
+        "너는 DART 공시 질의응답 시스템의 질문 분석기다. 사용자 질문을 검색하기 좋게",
+        "다시 쓰고 구조화한다. JSON 하나만 출력한다. 설명·마크다운·코드펜스 금지.",
+        "",
+        "[코퍼스]",
+        "- 70개사, 2023년 1월 ~ 2026년 3월에 접수된 공시만 있다",
+        "- 법인명 목록 (companies 에는 이 표기만 쓴다):",
+        "  " + _corp_names(),
+        "",
+        "[출력 JSON — 이 7개 키를 전부 넣는다]",
+        '{"rewritten": "질문을 명확하게 다시 쓴 문장", "sub_questions": ["..."],',
+        ' "companies": [], "fiscal_years": [], "doc_groups": [], "time_note": "",',
+        ' "out_of_scope": false}',
+        "",
+        "[규칙]",
+        "- rewritten: 상대 시점을 절대 시점으로, 축약 회사명을 정식 법인명으로,",
+        "  모호한 표현을 공시 용어로 바꾼다. 질문의 의도를 바꾸지 마라.",
+        "  없는 조건을 더하지 마라",
+        "- 여러 질문이 섞여 있으면 sub_questions 로 나누고, rewritten 에는 전체를",
+        "  명확히 다시 쓴 것을 넣는다. 질문이 하나면 sub_questions 도 1개다",
+        "- '올해·최근·현재' 는 오늘 날짜가 아니라 코퍼스에서 확인 가능한 가장 최근",
+        "  시점(2026년 3월 접수분까지)으로 해석한다. 해석 근거를 time_note 에 적는다",
+        "- '작년 매출' 처럼 연도가 상대적이면 회계연도로 환산한다.",
+        "  2025 회계연도 사업보고서는 2026년 3월에 접수된다는 점에 주의하라",
+        "- 질문에 연도가 명시돼 있으면(예: '2024년') **그 연도를 그대로** 쓴다.",
+        "  상대 표현('작년·올해·최근')일 때만 환산한다. 명시된 연도를 바꾸지 마라",
+        "- companies: 위 목록의 법인명으로 정규화한다. '전체·모든·상장사' 류는",
+        "  회사가 아니므로 companies 를 [] 로 둔다",
+        "- fiscal_years: 질문이 가리키는 회계연도(정수). 모르면 []",
+        "- doc_groups: 질문이 공시 종류를 명시했을 때만 넣는다. 아니면 [].",
+        "  periodic(정기보고서)·exchange(거래소 수시공시)·major(주요사항보고서)·",
+        "  holding(지분공시) 중에서",
+        "- out_of_scope: 질문 시점이 2023.01~2026.03 밖이면 true",
+        "- 확신이 없으면 비워라. 추측해 채우지 마라",
+        "",
+        # 규칙 문장보다 예시가 잘 먹힌다(이 리포의 반복된 교훈). 실측으로
+        # '가장 좋은 회사는?' 류 질문에서 마크다운 머리말·굵은 키 이름으로
+        # 형식이 깨졌다 — 어려운 질문일수록 예시 모양을 베끼게 한다.
+        "[예시 1 — 질문: \"요즘 실적 제일 좋은 데가 어디야?\"] (상대 시점 환산)",
+        '{"rewritten": "코퍼스에서 확인 가능한 가장 최근 회계연도(2025년) 실적이 '
+        '가장 좋은 회사는 어디인가?", "sub_questions": ["코퍼스에서 확인 가능한 '
+        '가장 최근 회계연도(2025년) 실적이 가장 좋은 회사는 어디인가?"], '
+        '"companies": [], "fiscal_years": [2025], "doc_groups": [], '
+        '"time_note": "\'요즘\'을 코퍼스 최신 접수분(2026.03)에 담긴 2025 '
+        '회계연도로 해석", "out_of_scope": false}',
+        "",
+        "[예시 2 — 질문: \"2023년 매출 1위는? 그리고 삼성전자의 2023년 배당은?\"]",
+        "(질문 둘 혼합 · 명시된 연도는 그대로)",
+        '{"rewritten": "2023 회계연도 매출액이 가장 큰 회사와 삼성전자의 2023 '
+        '회계연도 배당 내용을 묻는다", "sub_questions": ["2023 회계연도 매출액이 '
+        '가장 큰 회사는 어디인가?", "삼성전자의 2023 회계연도 배당은 어떠했는가?"], '
+        '"companies": ["삼성전자"], "fiscal_years": [2023], "doc_groups": [], '
+        '"time_note": "", "out_of_scope": false}',
+        "",
+        "예시의 회사·연도를 베끼지 마라 — 베낄 것은 **모양**이지 값이 아니다.",
+        "위 예시처럼 **JSON 하나만** 출력한다. 설명·머리말·꼬리말·마크다운·굵은",
+        "글씨 전부 금지. 출력의 첫 글자는 { 이고 마지막 글자는 } 다.",
+    ])
+
+
+def _parse(text: str):
+    """모델 출력에서 JSON 하나를 꺼낸다. 실패하면 None (예외 없음).
+
+    【왜 find/rfind 가 아니라 raw_decode 스캔인가 — 실측】
+    모델이 JSON 앞뒤에 산문·코드펜스를 붙인다. 첫 '{' 와 마지막 '}' 를 자르는
+    방식은 머리말에 '{' 가 있거나 꼬리말에 '}' 가 있으면 통째로 깨진다.
+    `JSONDecoder.raw_decode` 는 그 위치에서 시작하는 **완결된 JSON 하나**만 읽고
+    뒤는 무시하므로, '{' 후보를 차례로 시도하면 어디에 묻혀 있어도 꺼낸다.
+    """
+    try:
+        s = _FENCE.sub("", (text or "").strip()).strip()
+        dec = json.JSONDecoder()
+        d = None
+        pos = s.find("{")
+        while pos != -1:
+            try:
+                cand, _ = dec.raw_decode(s[pos:])
+                if isinstance(cand, dict):
+                    d = cand
+                    break
+            except ValueError:
+                pass
+            pos = s.find("{", pos + 1)
+        if d is None:
+            return None
+        out = {}
+        for k, dv in _DEFAULTS.items():
+            v = d.get(k, dv)
+            if isinstance(dv, list):
+                v = [x for x in v if isinstance(x, (str, int, float))] \
+                    if isinstance(v, list) else []
+                if k == "fiscal_years":
+                    ys = []
+                    for x in v:
+                        try:
+                            ys.append(int(x))
+                        except (TypeError, ValueError):
+                            continue
+                    v = ys
+                else:
+                    v = [str(x).strip() for x in v if str(x).strip()]
+            elif isinstance(dv, bool):
+                v = bool(v)
+            else:
+                v = str(v or "").strip()
+            out[k] = v
+        return out
+    except Exception:                          # noqa: BLE001 — 파싱 실패는 생략 사유일 뿐
+        traceback.print_exc(file=sys.stderr)
+        return None
+
+
+def rewrite_question(question, model=None, budget_s=None) -> dict:
+    """질문 하나를 분석한다. 예외 없음.
+
+    반환: {"ok": bool, "analysis": dict|None, "note": str,
+           "res": clova 응답|None, "elapsed": float}
+    `res` 는 성공·실패와 무관하게 토큰 회계(_account)용으로 그대로 돌려준다.
+    """
+    if budget_s is None:
+        budget_s = REWRITE_BUDGET_S
+    out = {"ok": False, "analysis": None, "note": "", "res": None, "elapsed": 0.0}
+    try:
+        q = str(question or "").strip()
+        if not q:
+            out["note"] = "질문이 비어 있다"
+            return out
+        from src.agent import clova
+        t0 = time.time()
+        res = clova.chat([{"role": "system", "content": build_prompt()},
+                          {"role": "user", "content": q}],
+                         max_tokens=MAX_TOKENS, temperature=0.1, model=model)
+        out["elapsed"] = round(time.time() - t0, 2)
+        out["res"] = res
+        if not res.get("ok"):
+            out["note"] = f"LLM 실패: {str(res.get('error'))[:120]}"
+            return out
+        if out["elapsed"] > budget_s:
+            out["note"] = f"{budget_s:.0f}초 초과({out['elapsed']:.1f}초) — 결과를 버림"
+            return out
+        a = _parse(res.get("text") or "")
+        if a is None:
+            out["note"] = "JSON 파싱 실패"
+            return out
+        out["ok"], out["analysis"] = True, a
+        return out
+    except Exception as e:                     # noqa: BLE001 — 마지막 방어선
+        traceback.print_exc(file=sys.stderr)
+        out["note"] = f"{type(e).__name__}: {e}"
+        return out
+
+
+def analysis_block(a: dict) -> str:
+    """시스템 프롬프트에 붙일 [질문 분석] 블록. analysis 가 비면 빈 문자열."""
+    try:
+        if not a or not (a.get("rewritten") or a.get("companies")
+                         or a.get("fiscal_years") or a.get("time_note")):
+            return ""
+        L = ["[질문 분석 — 사전 분석기의 참고 정보]"]
+        if a.get("rewritten"):
+            L.append(f"- 재작성: {a['rewritten']}")
+        subs = a.get("sub_questions") or []
+        if len(subs) > 1:
+            L.append("- 하위 질문: " + " / ".join(f"{i}) {s}"
+                                                for i, s in enumerate(subs, 1)))
+        if a.get("companies"):
+            L.append("- 회사: " + "·".join(a["companies"])
+                     + " (corp_name 필터에 이 법인명을 쓴다)")
+        if a.get("fiscal_years"):
+            L.append("- 회계연도: " + "·".join(str(y) for y in a["fiscal_years"]))
+        if a.get("doc_groups"):
+            L.append("- 공시 종류: " + "·".join(a["doc_groups"]))
+        if a.get("time_note"):
+            L.append(f"- 시점 해석: {a['time_note']}")
+        if a.get("out_of_scope"):
+            L.append("- 주의: 질문 시점이 코퍼스 범위(2023.01~2026.03) 밖일 수 있다")
+        L.append("- 이 분석은 참고용이다. 검색 결과가 다르면 검색 결과를 따른다")
+        return "\n".join(L)
+    except Exception:                          # noqa: BLE001 — 블록 조립이 답을 막으면 안 된다
+        traceback.print_exc(file=sys.stderr)
+        return ""
+
+
+def _main() -> int:
+    """python -m src.agent.rewrite "질문"  →  분석 JSON 출력 (LLM 1회)."""
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("question")
+    ap.add_argument("--model", default=None)
+    a = ap.parse_args()
+    rw = rewrite_question(a.question, model=a.model)
+    print(json.dumps({"ok": rw["ok"], "note": rw["note"], "elapsed": rw["elapsed"],
+                      "analysis": rw["analysis"]}, ensure_ascii=False, indent=2))
+    return 0 if rw["ok"] else 1
+
+
+if __name__ == "__main__":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    raise SystemExit(_main())

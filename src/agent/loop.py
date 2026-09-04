@@ -40,6 +40,7 @@ json.loads() 를 걸면 터진다. 그래도 문자열로 올 경우를 대비�
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -399,14 +400,20 @@ def _read(name: str) -> str:
     return p.read_text(encoding="utf-8").strip() if p.is_file() else ""
 
 
-def build_system() -> str:
-    """planner(계획 규칙) 를 앞에, system(답변 규칙) 을 뒤에."""
+def build_system(analysis: str = "") -> str:
+    """planner(계획 규칙) 를 앞에, system(답변 규칙) 을 뒤에.
+
+    `analysis` 는 질문 재작성기의 [질문 분석] 블록이다. 있으면 **planner 앞**에
+    붙는다 — 도구 인자를 정할 때 가장 먼저 읽히는 자리다. 힌트일 뿐이므로
+    비어 있어도 아무 일도 없다.
+    """
     planner, system = _read("planner.txt"), _read("system.txt")
     if not system:
         system = _read("system_min.txt")
     head = "당신은 DART 전자공시를 근거로 답하는 분석 어시스턴트다."
     body = system[len(head):].lstrip() if system.startswith(head) else system
-    return f"{head}\n\n{planner}\n\n{body}".strip()
+    mid = f"{analysis.strip()}\n\n{planner}" if (analysis or "").strip() else planner
+    return f"{head}\n\n{mid}\n\n{body}".strip()
 
 
 def load_tools() -> list:
@@ -796,6 +803,10 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
                      # 최종 답변 검문이 걸렸으면 그 종류 —
                      # calc·compare·no_search·all_bad·announced 중 하나
                      "audit": ""},
+           # 질문 재작성 단계의 결과. _rewrite_step 이 채운다 — 그 전에 죽어도
+           # 키는 있어야 서버 trace 가 "생략" 을 적을 수 있다
+           "rewrite": {"ok": False, "note": "실행 안 됨", "analysis": None,
+                       "elapsed": 0.0},
            "stopped_by_budget": False, "unsourced_claim": False,
            # 검색이 올린 청크 원문. 평가 서버가 retrieved_context 로 그대로 내보낸다.
            # sources 는 출처 문자열뿐이라 본문이 없다.
@@ -908,12 +919,55 @@ def _account(out: dict, res: dict, model: str, qid) -> None:
         w["resent_prompt_tokens_est"] += row["retries"] * row["prompt_tokens"]
 
 
+def _rewrite_on() -> bool:
+    """질문 재작성 스위치. DART_REWRITE=0 이면 끈다 — 운영 킬스위치이자,
+    루프 역학만 시험하는 테스트(가짜 LLM 의 턴 수가 밀리면 안 된다)용이다."""
+    return (os.environ.get("DART_REWRITE", "1").strip().lower()
+            not in ("0", "false", "no", "off"))
+
+
+def _rewrite_step(question, out, model, qid) -> str:
+    """질문 재작성 1회. [질문 분석] 블록 문자열을 돌려준다(실패하면 빈 문자열).
+
+    【실패 시 동작 — 계약】 재작성 LLM 이 죽든, JSON 이 깨지든, 15초를 넘기든
+    이 함수는 빈 문자열을 돌려주고 루프는 지금까지와 똑같이 진행한다.
+    예외는 여기서 전부 삼키고 stderr 에만 남긴다.
+    토큰은 성공·실패와 무관하게 `_account` 로 회계한다(부른 건 부른 것이다).
+    """
+    info = {"ok": False, "note": "", "analysis": None, "elapsed": 0.0}
+    block = ""
+    try:
+        from src.agent import clova
+        from src.agent import rewrite as rewrite_mod
+
+        budget = usage_mod.active_budget()
+        if not _rewrite_on():
+            info["note"] = "비활성화(DART_REWRITE=0)"
+        elif budget is not None and budget.exceeded():
+            info["note"] = "비용 상한으로 생략"
+        else:
+            rw = rewrite_mod.rewrite_question(question, model=model)
+            info.update(ok=rw["ok"], note=rw["note"], analysis=rw["analysis"],
+                        elapsed=rw["elapsed"])
+            out["llm_seconds"] += rw["elapsed"]
+            if rw.get("res") is not None:
+                _account(out, rw["res"], clova.resolve_model(model), qid)
+            if rw["ok"]:
+                block = rewrite_mod.analysis_block(rw["analysis"])
+    except Exception as e:                     # noqa: BLE001 — 이 단계가 답을 막으면 안 된다
+        traceback.print_exc(file=sys.stderr)
+        info["note"] = f"{type(e).__name__}: {e}"
+    out["rewrite"] = info
+    return block
+
+
 def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> dict:
     from src.agent import clova
     from src.tools import TOOLS
 
+    analysis = _rewrite_step(question, out, model, qid)
     tools = load_tools()
-    msgs = [{"role": "system", "content": build_system()},
+    msgs = [{"role": "system", "content": build_system(analysis)},
             {"role": "user", "content": str(question)}]
     cache: dict = {}
     n_calls = 0

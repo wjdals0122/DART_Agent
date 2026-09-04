@@ -27,6 +27,11 @@ for _s in (sys.stdout, sys.stderr):
     if hasattr(_s, "reconfigure"):
         _s.reconfigure(encoding="utf-8", errors="replace")
 
+import os  # noqa: E402
+
+# 계측(루프 역학)만 시험한다 — 재작성 단계가 켜지면 가짜 LLM 의 턴 수가 밀린다
+os.environ["DART_REWRITE"] = "0"
+
 from src.agent import clova, loop  # noqa: E402
 from src.agent import usage as U  # noqa: E402
 
