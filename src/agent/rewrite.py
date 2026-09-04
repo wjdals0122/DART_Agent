@@ -132,7 +132,9 @@ def build_prompt() -> str:
         "  상대 표현('작년·올해·최근')일 때만 환산한다. 명시된 연도를 바꾸지 마라",
         "- companies: 위 목록의 법인명으로 정규화한다. '전체·모든·상장사' 류는",
         "  회사가 아니므로 companies 를 [] 로 둔다",
-        "- fiscal_years: 질문이 가리키는 회계연도(정수). 모르면 []",
+        "- fiscal_years: 질문에 명시됐거나('2024년') '작년'처럼 특정 연도로 환산되는",
+        "  회계연도(정수)만. 시점이 열려 있는 질문('최신·최종·현재·작성기준일 이후·",
+        "  이력·정리·현황')은 **비워라** — 연도를 걸면 다른 해의 건이 통째로 빠진다(실측)",
         "- ki: '제50기' 같은 기수의 N(정수). **제N기는 fiscal_years 가 아니라",
         "  ki 에 넣는다. 연도로 환산하지 마라** — 도구가 회사별 표로 환산한다.",
         "  기수 언급이 없으면 []",
@@ -256,10 +258,12 @@ def rewrite_question(question, model=None, budget_s=None) -> dict:
         a = _parse(res.get("text") or "")
         if a is None:
             # 실측(e2e_v5 3/40): JSON 없이 산문만 출력하는 형식 이탈. 파서로는
-            # 구제 불가라 원본을 남기고 **같은 입력으로 한 번만** 다시 부른다.
+            # 구제 불가라 원본을 남기고 같은 입력으로 한 번만 다시 부른다.
+            # 【재시도 온도 0.5 — step41】 같은 온도(0.1) 재시도는 같은 산문을
+            # 재생성해 무의미했다(22번 0/3 실측). 표본을 흔들어야 형식이 돌아온다.
             _log_fail(q, res.get("text"), "JSON 파싱 실패(1차)")
             time.sleep(2.0)
-            res2 = clova.chat(msgs, max_tokens=MAX_TOKENS, temperature=0.1,
+            res2 = clova.chat(msgs, max_tokens=MAX_TOKENS, temperature=0.5,
                               model=model)
             out["elapsed"] = round(time.time() - t0, 2)
             out["res_retry"] = res2            # 토큰 회계용 — 부른 건 부른 것이다

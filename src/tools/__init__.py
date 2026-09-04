@@ -172,6 +172,100 @@ def _sources(hits) -> list:
     return out
 
 
+# 「공시내용 진행 및 변경사항」 절 판정 — context.progress_note 와 같은 세 조각.
+_PROGRESS_PARTS = ("공시내용", "진행", "변경")
+_PROGRESS_CAP = 12          # 청크가 아주 많은 회사 방어. 표는 보통 2~6청크다
+_RC_ARR = None              # searcher.receipt_no 를 str 로 굳힌 캐시
+
+
+def _rc_array(searcher):
+    global _RC_ARR
+    if _RC_ARR is None:
+        _RC_ARR = searcher.receipt_no.astype(str)
+    return _RC_ARR
+
+
+def _get_progress_table(corp_name=None) -> dict:
+    """정기보고서의 「공시내용 진행 및 변경사항」 표 청크를 **결정적으로** 돌려준다.
+
+    【왜 — e2e_v5 7·19·37 + 회귀 7번 실측】 계약·투자의 진행·변경·최종확정 정답이
+    이 표에 있는데, 모델이 거래소공시만 보고 이 표를 못 본다. planner 지시
+    (step17 [C-2])로는 안 됐다(37번 재발). 검색기(BM25·dense)를 거치지 않고
+    section_path 필터만 쓴다 — 같은 입력이면 언제나 같은 결과다.
+
+    최신 정기보고서부터 훑어 **그 절이 있는 첫 보고서**의 청크 전부(상한 12)를
+    돌려준다. 지시는 "최신 정기보고서" 하나였지만, 최신 분기보고서에 그 절이
+    없는 회사가 있어 절이 나올 때까지 최신순으로 내려간다(결정적임은 같다).
+    """
+    import re as _re
+
+    out = {"status": "ok", "results": [], "sources": [], "note": ""}
+    if corp_name is None or not str(corp_name).strip():
+        return {"status": "error", "results": [], "sources": [],
+                "note": "corp_name 이 비어 있다. 회사명을 넣어 다시 호출하라"}
+    from src.search.aliases import resolve_company
+    r = resolve_company(str(corp_name))
+    if r.get("status") != "ok":
+        return {"status": r.get("status", "error"), "results": [], "sources": [],
+                "note": r.get("note") or f"'{corp_name}' 을 회사 하나로 특정하지 못했다"}
+    code = str(r["stock_code"])
+
+    from src.search.hybrid import get_searcher
+    from src.tools.listing import _load as _load_manifest
+
+    import numpy as np
+
+    s = get_searcher()
+    rc_arr = _rc_array(s)
+    docs, _smax = _load_manifest()
+    periodic = sorted((d for d in docs
+                       if str(d.get("stock_code")) == code
+                       and str(d.get("doc_group")) == "periodic"),
+                      key=lambda d: str(d.get("rcept_dt") or ""), reverse=True)
+    if not periodic:
+        return {"status": "not_found", "results": [], "sources": [],
+                "note": f"{r['corp_name']} 의 정기보고서가 코퍼스에 없다"}
+
+    ws = _re.compile(r"\s+")
+    for d in periodic:
+        rc = str(d.get("rcept_no"))
+        rows = np.nonzero(rc_arr == rc)[0]
+        hits = []
+        for row in rows:
+            row = int(row)
+            if bool(s.preserved[row]):
+                continue                      # 정정으로 밀려난 구본은 건너뛴다
+            rec = s.store.get(row)
+            sect = " > ".join(rec.get("section_path") or [])
+            flat = ws.sub("", sect)
+            if not all(p in flat for p in _PROGRESS_PARTS):
+                continue
+            hits.append({
+                "chunk_id": str(s.chunk_id[row]),
+                "text": str(rec.get("content") or "")[:4000],
+                "source": {"corp_name": str(s.company[row]),
+                           "report_nm": str(s.report_nm[row]),
+                           "rcept_dt": str(s.rcept_dt[row]),
+                           "rcept_no": rc, "section": sect, "note": ""},
+                "rank": len(hits) + 1, "row": row,
+                "doc_id": str(s.doc_id[row]),
+                "preserved": False,
+            })
+            if len(hits) >= _PROGRESS_CAP:
+                break
+        if hits:
+            out["results"] = hits
+            out["sources"] = _sources(hits)
+            out["note"] = (f"{d.get('report_nm')}(접수 {d.get('rcept_dt')}) 의 "
+                           f"「공시내용 진행 및 변경사항」 청크 {len(hits)}건. "
+                           "신고일자 칸에 '(변경공시 …)' 표기가 있으면 그 금액은 "
+                           "변경 반영값이다")
+            return out
+    return {"status": "not_found", "results": [], "sources": [],
+            "note": f"{r['corp_name']} 의 정기보고서에서 「공시내용 진행 및 변경사항」 "
+                    "절을 찾지 못했다. search_disclosure 로 본문 검색을 시도하라"}
+
+
 def _resolve_company(name=None) -> dict:
     from src.search.aliases import resolve_company
 
@@ -189,13 +283,15 @@ calculate = safe_tool(_calculate)
 list_disclosures = safe_tool(_list_disclosures)
 search_disclosure = safe_tool(_search_disclosure)
 resolve_company = safe_tool(_resolve_company)
+get_progress_table = safe_tool(_get_progress_table)
 
 TOOLS = {
     "search_disclosure": search_disclosure,
     "list_disclosures": list_disclosures,
     "calculate": calculate,
     "resolve_company": resolve_company,
+    "get_progress_table": get_progress_table,
 }
 
 __all__ = ["TOOLS", "safe_tool", "calculate", "list_disclosures",
-           "search_disclosure", "resolve_company"]
+           "search_disclosure", "resolve_company", "get_progress_table"]

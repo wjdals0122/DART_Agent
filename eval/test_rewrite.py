@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """질문 재작성 단계 검증. **LLM 을 부르지 않는다** (clova.chat 을 가짜로 갈아끼운다).
 
   python eval/test_rewrite.py
@@ -101,7 +101,7 @@ check("재작성 1회 시도됨", st["n_rewrite"] == 1, str(st["n_rewrite"]))
 check("rewrite.ok=False + 사유", r["rewrite"]["ok"] is False
       and "LLM 실패" in r["rewrite"]["note"], repr(r["rewrite"]["note"]))
 check("시스템 프롬프트에 [질문 분석] 없음",
-      all("[질문 분석" not in s for s in st["systems"]))
+      all("[질문 분석 —" not in s for s in st["systems"]))
 
 print()
 print("=" * 74)
@@ -113,7 +113,7 @@ check("answer() 정상", spec_ok(r), r["answer"][:40])
 check("rewrite.ok=False + 파싱 사유", r["rewrite"]["ok"] is False
       and "파싱" in r["rewrite"]["note"], repr(r["rewrite"]["note"]))
 check("시스템 프롬프트에 [질문 분석] 없음",
-      all("[질문 분석" not in s for s in st["systems"]))
+      all("[질문 분석 —" not in s for s in st["systems"]))
 
 print()
 print("=" * 74)
@@ -136,7 +136,7 @@ check("answer() 정상", spec_ok(r), r["answer"][:40])
 check("결과를 버렸다(ok=False + 초과 사유)", r["rewrite"]["ok"] is False
       and "초과" in r["rewrite"]["note"], repr(r["rewrite"]["note"]))
 check("시스템 프롬프트에 [질문 분석] 없음",
-      all("[질문 분석" not in s for s in st["systems"]))
+      all("[질문 분석 —" not in s for s in st["systems"]))
 
 print()
 print("=" * 74)
@@ -147,7 +147,7 @@ check("answer() 정상", spec_ok(r), r["answer"][:40])
 check("rewrite.ok=True", r["rewrite"]["ok"] is True, repr(r["rewrite"]["note"]))
 check("분석이 담겨 있다", (r["rewrite"]["analysis"] or {}).get("companies") == ["한화오션"])
 sys_prompt = st["systems"][0] if st["systems"] else ""
-check("[질문 분석] 블록이 들어갔다", "[질문 분석" in sys_prompt)
+check("[질문 분석] 블록이 들어갔다", "[질문 분석 —" in sys_prompt)
 check("재작성문이 블록에 있다", REWRITTEN in sys_prompt)
 check("참고용 문구가 있다", "이 분석은 참고용이다" in sys_prompt)
 i_block, i_head = sys_prompt.find("[질문 분석"), sys_prompt.find("당신은 DART")

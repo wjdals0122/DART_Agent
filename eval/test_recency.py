@@ -150,6 +150,27 @@ def main() -> int:
           r["status"] == "not_found" and "corp_name 을 빼고" not in r["note"],
           r["note"][:60])
 
+    print(f"\n{BAR}\n7-c — get_progress_table (step41 · 결정적 절 조회)\n{BAR}")
+    g = TOOLS["get_progress_table"](corp_name="HD현대일렉트릭")
+    print(f"   note={g['note'][:110]}")
+    check("HD현대일렉트릭 진행 표 ok", g["status"] == "ok" and len(g["results"]) >= 1,
+          f"{g['status']} · {len(g['results'])}건")
+    check("전부 「공시내용 진행 및 변경사항」 절",
+          all(all(p in (h['source']['section'] or '').replace(' ', '')
+                  for p in ('공시내용', '진행', '변경')) for h in g["results"]),
+          str([h['source']['section'][:40] for h in g["results"][:2]]))
+    check("sources 가 붙는다", len(g["sources"]) >= 1, str(g["sources"][:1]))
+    check("note 에 변경공시 읽는 법", "변경공시" in g["note"])
+    g2 = TOOLS["get_progress_table"](corp_name="HD현대일렉트릭")
+    check("결정적 — 두 번 불러도 같은 청크",
+          [h["chunk_id"] for h in g["results"]] == [h["chunk_id"] for h in g2["results"]])
+    gx = TOOLS["get_progress_table"](corp_name="없는회사")
+    check("미상 회사 → not_found/error + note",
+          gx["status"] in ("not_found", "error", "ambiguous") and gx["note"],
+          f"{gx['status']} · {gx['note'][:50]}")
+    ge = TOOLS["get_progress_table"]()
+    check("corp_name 없으면 error", ge["status"] == "error", ge["note"][:40])
+
     print(f"\n{BAR}\n7-b — doc_group · 목록→본문 안내\n{BAR}")
     r = TOOLS["list_disclosures"](corp_name="두산퓨얼셀", doc_group="exchange",
                                   fiscal_year=2024)

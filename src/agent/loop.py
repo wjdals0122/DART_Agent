@@ -258,6 +258,35 @@ _ANNOUNCE = ("하겠습니다", "해야 합니다", "필요합니다", "검색�
 # 바로 뒤 문자만 봐서는 못 잡는다). 실제로 부른 도구 언급은 called 검사가 걸러 준다.
 _CALL_WINDOW = 20
 
+# 검문 7 — 하위 질문 수보다 본문 검색이 적을 때 (2-A · step41).
+#
+# 【왜 — e2e_v5 실측 4건(6·12·18·30)】 재작성이 하위 질문 3개로 나눴는데
+# search 1회로 끝내고 "확인되지 않음" 이라 답했다. 코퍼스에 인적분할 151청크가
+# 있었다. 상태 기반 — 답변 내용이 아니라 (하위 질문 수 vs 검색 횟수)만 본다.
+AUDIT_SUBQ = (
+    "하위 질문 {n}개 중 {m}개만 조회했다. 아직 조회하지 않은 하위 질문을 "
+    "각각 검색한 뒤 답하라."
+)
+
+
+def subq_under_searched(rewrite_info, tool_calls):
+    """(하위 질문 수, 검색 횟수) 또는 None. 하위 질문 2개 이상 + 검색이 그보다 적을 때만."""
+    try:
+        a = ((rewrite_info or {}).get("analysis") or {}) \
+            if (rewrite_info or {}).get("ok") else {}
+        subs = [s for s in (a.get("sub_questions") or []) if str(s).strip()]
+        if len(subs) < 2:
+            return None
+        m = sum(1 for c in (tool_calls or [])
+                if (c or {}).get("name") == "search_disclosure")
+        if m >= len(subs):
+            return None
+        return len(subs), m
+    except Exception:                          # noqa: BLE001 — 검문이 답을 막으면 안 된다
+        traceback.print_exc(file=sys.stderr)
+        return None
+
+
 # 검문 8 — 답변의 수치가 검색 결과·질문·계산 결과 어디에도 없을 때.
 #
 # 【왜 — e2e_v5 2번 실측】 Pfizer 선급금으로 USD 10,000,000 / 2,000,000 을
@@ -624,7 +653,7 @@ def _render(name: str, out: dict) -> str:
     if note:
         head += f" · {note}"
 
-    if name == "search_disclosure" and out.get("results"):
+    if name in ("search_disclosure", "get_progress_table") and out.get("results"):
         try:
             from src.agent.context import build_context
             body = build_context(out["results"])
@@ -1025,7 +1054,7 @@ def _keep_documents(out: dict, name: str, tool_out: dict) -> None:
     `sources` 는 `[회사 보고서명 …, 접수번호 …]` 문자열이라 본문이 없다.
     평가 서버가 "답변 생성에 참고한 검색 문서" 를 내보내려면 본문이 필요하다.
     """
-    if name != "search_disclosure":
+    if name not in ("search_disclosure", "get_progress_table"):
         return
     seen = {d["chunk_id"] for d in out["documents"]}
     for h in (tool_out.get("results") or []):
@@ -1237,8 +1266,8 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
             if extra is not None and out["tool_calls"] and not list_only_nudged:
                 listed = any(c["name"] == "list_disclosures" and c["status"] == "ok"
                              for c in out["tool_calls"])
-                searched = any(c["name"] == "search_disclosure" and c["status"] == "ok"
-                               for c in out["tool_calls"])
+                searched = any(c["name"] in ("search_disclosure", "get_progress_table")
+                               and c["status"] == "ok" for c in out["tool_calls"])
                 if listed and not searched:
                     list_only_nudged = True
                     prev_answer = text
@@ -1260,6 +1289,10 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
                                                 out["tool_calls"], out["sources"])):
                     kind = "unsourced_num"
                     note = AUDIT_UNSOURCED_NUM.format(nums=", ".join(miss))
+                elif (nm := subq_under_searched(out.get("rewrite"),
+                                                out["tool_calls"])):
+                    kind = "subq"
+                    note = AUDIT_SUBQ.format(n=nm[0], m=nm[1])
                 elif refused_without_search(text, out["tool_calls"]):
                     kind, note = "no_search", AUDIT_NO_SEARCH
                 elif all_tools_failed(text, out["tool_calls"]):

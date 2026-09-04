@@ -214,6 +214,24 @@ check("비교 표현이 없으면 안 잡는다",
 
 print()
 print("=" * 74)
+print("2-H — 검문 7 판정(subq_under_searched): 하위 질문 수 vs 검색 횟수 (step41)")
+print("=" * 74)
+
+RW3 = {"ok": True, "analysis": {"sub_questions": ["사업 내용", "확장 계획", "분할 이유"]}}
+check("하위 3개 · 검색 1회 → (3, 1)",
+      loop.subq_under_searched(RW3, tc("search_disclosure")) == (3, 1))
+check("검색 3회면 통과",
+      loop.subq_under_searched(RW3, tc("search_disclosure") * 3) is None)
+check("하위 질문 1개면 통과",
+      loop.subq_under_searched({"ok": True, "analysis": {"sub_questions": ["하나"]}},
+                               []) is None)
+check("재작성 실패면 통과(기준이 없다)",
+      loop.subq_under_searched({"ok": False, "analysis": None}, []) is None)
+check("검색 0회도 잡는다", loop.subq_under_searched(RW3, tc("calculate")) == (3, 0))
+check("지저분한 입력 예외 없음", loop.subq_under_searched(None, None) is None)
+
+print()
+print("=" * 74)
 print("2-G — 검문 8 판정(unsourced_numbers): 답변에만 있는 수치 (step40)")
 print("=" * 74)
 
@@ -632,6 +650,50 @@ check("그래도 답은 나온다", bool(r13["answer"].strip()), r13["answer"][:
 r14, _ = run_compare(["2024년 자료는 공시에서 확인되지 않습니다."])
 check("수치 없는 답변은 검문 8 미발동", r14["waste"]["audit"] != "unsourced_num",
       repr(r14["waste"]["audit"]))
+
+print()
+print("=" * 74)
+print("4-F — 검문 7 이 루프에서 딱 한 턴만 (step41 · 재작성 켠 상태)")
+print("=" * 74)
+
+RW_JSON = ('{"rewritten": "세 가지를 묻는다", "sub_questions": ["사업 내용은?", '
+           '"확장 계획은?", "분할 이유는?"], "companies": [], "fiscal_years": [], '
+           '"ki": [], "doc_groups": [], "time_note": "", "out_of_scope": false}')
+os.environ["DART_REWRITE"] = "1"
+state7f = {"i": 0, "seen": []}
+
+
+def fake_subq(messages, **kw):
+    head = (messages[0].get("content") or "") if messages else ""
+    if "질문 분석기" in head:
+        return {"ok": True, "text": RW_JSON, "tool_calls": [], "usage": {}}
+    state7f["seen"].append([m.get("content") for m in messages])
+    i = state7f["i"]
+    state7f["i"] += 1
+    if i == 0 and kw.get("extra"):
+        return {"ok": True, "text": "", "finish_reason": "tool_calls", "usage": {},
+                "tool_calls": [{"id": "c1", "type": "function",
+                                "function": {"name": "search_disclosure",
+                                             "arguments": {"query": "사업 내용"}}}]}
+    return {"ok": True, "text": "사업 내용은 확인했고 나머지는 확인되지 않습니다.",
+            "tool_calls": [], "finish_reason": "stop", "usage": {}}
+
+
+T.TOOLS = dict(real_tools)
+T.TOOLS["search_disclosure"] = lambda **kw: {
+    "status": "ok", "results": [], "sources": ["[○○ 사업보고서]"], "note": ""}
+clova.chat = fake_subq
+try:
+    r15 = answer("세 가지 질문", deadline=50.0)
+finally:
+    clova.chat = real_chat
+    T.TOOLS = real_tools
+    os.environ["DART_REWRITE"] = "0"
+check("검문 7 이 걸렸다", r15["waste"]["audit"] == "subq", repr(r15["waste"]["audit"]))
+last15 = state7f["seen"][-1]
+check("검문 7 지시가 들어갔다(개수 포함)",
+      any("하위 질문 3개 중 1개만" in (c or "") for c in last15))
+check("그래도 답은 나온다", bool(r15["answer"].strip()), r15["answer"][:40])
 
 print()
 print("=" * 74)
