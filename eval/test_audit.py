@@ -267,6 +267,27 @@ check("근거 절 출처 문자열의 값도 통과",
 check("지저분한 입력 예외 없음",
       loop.unsourced_numbers(None, None, None, None) == [])
 
+# step44-F — 자리표시자 숫자·가짜 회사명
+D31 = [{"chunk_id": "c1", "text": "계약금액 123,456백만원"}]   # 문서에 있어도 잡는다
+check("123,456 패턴 숫자는 무조건 잡는다 — 실측 31",
+      "123456" in loop.unsourced_numbers("계약금액은 123,456백만원이다.", D31, "질문", []))
+check("111111 반복 숫자도 잡는다",
+      "111111" in loop.unsourced_numbers("금액 111,111천원.", [], "질문", []))
+check("ABC 가짜 회사명을 잡는다 — 실측 31",
+      "ABC" in loop.unsourced_numbers("ABC 에너지와 계약했다.", [], "질문", []))
+check("질문이 그 표기를 담으면 봐준다",
+      loop.unsourced_numbers("ABC 에너지와의 계약은 확인되지 않습니다.", [],
+                             "ABC 에너지 계약 물어봄", []) == [])
+check("정상 수치는 패턴으로 안 잡힌다",
+      loop._is_placeholder_number("10147727") is False
+      and loop._is_placeholder_number("66192960") is False)
+check("654321 내림 패턴도 잡는다", loop._is_placeholder_number("654321") is True)
+check("자리표시자 숫자 문단을 후처리가 지운다",
+      loop.strip_placeholders("정상 문단 644억원.\n\n계약금액 123,456백만원과 "
+                              "ABC 에너지.\n\n끝.") == "정상 문단 644억원.\n\n끝.")
+check("가짜명 없는 답변은 후처리 그대로",
+      loop.strip_placeholders("매출 10,147,727백만원.") == "매출 10,147,727백만원.")
+
 print()
 print("=" * 74)
 print("2-E — 검문 되읊기 방어(audit_degraded)·자리표시자 제거 (step39)")

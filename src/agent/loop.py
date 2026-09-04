@@ -203,17 +203,33 @@ def audit_degraded(new: str, prev: str) -> bool:
         return False
 
 
+def _fabricated_marker(p: str) -> bool:
+    """문단에 자리표시자(예시 명칭·가짜 회사명·패턴 숫자)가 있나. 예외 없음.
+
+    step44-F 확장 — [31] 이 "123,456백만원"·"ABC 에너지" 를 답했다.
+    """
+    try:
+        if any(x in p for x in PLACEHOLDERS):
+            return True
+        if _FAKE_NAME.search(p):
+            return True
+        flat = p.replace(",", "")
+        return any(_is_placeholder_number(m.group(0)) for m in _NUM6.finditer(flat))
+    except Exception:                          # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        return False
+
+
 def strip_placeholders(text: str) -> str:
-    """자리표시자(ㅇㅇ전자 등)가 든 문단을 제거한다. 검문과 무관하게 항상 적용.
+    """자리표시자(예시 명칭·가짜 회사명·패턴 숫자)가 든 문단을 제거한다. 항상 적용.
 
     남는 것이 없으면 빈 문자열을 돌려준다 — 부르는 쪽이 FALLBACK 으로 바꾼다.
     """
     try:
-        if not any(x in (text or "") for x in PLACEHOLDERS):
-            return (text or "").strip()        # 누출 없으면 원문 그대로(공백만 정리)
         paras = re.split(r"\n\s*\n", text or "")
-        kept = [p for p in paras
-                if p.strip() and not any(x in p for x in PLACEHOLDERS)]
+        if not any(_fabricated_marker(p) for p in paras):
+            return (text or "").strip()        # 누출 없으면 원문 그대로(공백만 정리)
+        kept = [p for p in paras if p.strip() and not _fabricated_marker(p)]
         return "\n\n".join(kept).strip()
     except Exception:                          # noqa: BLE001
         traceback.print_exc(file=sys.stderr)
@@ -315,6 +331,21 @@ AUDIT_UNSOURCED_NUM = (
 )
 # 백분율(숫자+%·퍼센트)은 검사 대상에서 뺀다 — 계산·인용 어느 쪽이든 검문 1이 담당
 _PCT_TOKEN = re.compile(r"\d[\d,]*(?:\.\d+)?\s*(?:%|퍼센트)")
+# 자리표시자류 — step44-F 실측: [31] 이 "123,456백만원"·"ABC 에너지" 를 답했다.
+_FAKE_NAME = re.compile(r"\b(?:ABC|XXX|OOO)\b|ㅇㅇ|△△|○○")
+
+
+def _is_placeholder_number(d: str) -> bool:
+    """123456·654321·111111·000000 류 연속·반복 패턴 숫자인가."""
+    try:
+        if len(d) < 6:
+            return False
+        if len(set(d)) == 1:
+            return True
+        diffs = {(int(d[i + 1]) - int(d[i])) % 10 for i in range(len(d) - 1)}
+        return diffs == {1} or diffs == {9}
+    except Exception:                          # noqa: BLE001
+        return False
 # 'X조 Y억' / 'X억' 한글 단위 표기 — 자리수 표기와 같은 값으로 봐야 한다
 _KOR_NUM = re.compile(r"(?:(\d[\d,]*)\s*조\s*)?(\d[\d,]*)\s*억|(\d[\d,]*)\s*조")
 _NUM6 = re.compile(r"\d{6,}")
@@ -368,12 +399,22 @@ def unsourced_numbers(text, documents, question, tool_calls, sources=None) -> li
         flat = body.replace(",", "")
         for m in _NUM6.finditer(flat):
             d = m.group(0)
+            if _is_placeholder_number(d):       # 123456·111111 류는 무조건 잡는다
+                if d not in missing:
+                    missing.append(d)
+                continue
             if len(d) == 14:
                 continue                        # 접수번호
             if len(d) == 8 and d[:2] in ("19", "20"):
                 continue                        # YYYYMMDD 날짜
             if not matched(d) and d not in missing:
                 missing.append(d)
+        # 가짜 회사·기관명 — 질문에 그 표기가 있으면(인용) 봐준다
+        for m in _FAKE_NAME.finditer(text or ""):
+            tok = m.group(0)
+            if tok in str(question or "") or tok in missing:
+                continue
+            missing.append(tok)
         for m in _KOR_NUM.finditer(body):
             token = m.group(0)
             if token.replace(",", "") in hay:   # 같은 한글 표기가 근거에 그대로 있다
