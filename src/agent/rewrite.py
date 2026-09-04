@@ -48,6 +48,32 @@ _DEFAULTS = {
 
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.M)
 
+# doc_groups 는 질문이 공시 유형을 **명시적으로** 말했을 때만 인정한다.
+#
+# 【왜 코드인가 — 2026-09-04 실측 2회】
+# "내용으로 추정하지 마라" 를 규칙으로도, 예시 주석으로도 넣어 봤지만 두 번 다
+# "영업이익…정정공시…" 질문에 ["periodic"] 을 채웠다. 프롬프트로 세 번 막아도
+# 새는 것은 코드에서 정한다(이 리포의 반복된 교훈). 실제로 유형을 좁혔다가
+# 정답 문서를 놓친 사례가 있다(OCI홀딩스 Wacker 특허소송 — major 로 좁힘).
+# 질문 원문에 아래 낱말이 있어야 그 그룹을 남긴다. 없으면 버린다.
+_GROUP_WORDS = {
+    "periodic": ("정기공시", "정기보고서", "사업보고서", "반기보고서", "분기보고서"),
+    "exchange": ("거래소 공시", "거래소공시", "수시공시", "단일판매"),
+    "major": ("주요사항보고서", "주요사항 보고서"),
+    "holding": ("지분공시", "지분 공시", "대량보유"),
+}
+
+
+def _filter_doc_groups(groups, question) -> list:
+    """질문이 명시한 유형만 남긴다. 모르는 값·추정된 값은 버린다 (예외 없음)."""
+    try:
+        q = str(question or "")
+        return [g for g in (groups or [])
+                if g in _GROUP_WORDS and any(w in q for w in _GROUP_WORDS[g])]
+    except Exception:                          # noqa: BLE001 — 힌트 정제가 답을 막으면 안 된다
+        traceback.print_exc(file=sys.stderr)
+        return []
+
 
 def _corp_names() -> str:
     """코퍼스 70개사 법인명. 못 읽어도 재작성은 진행한다(목록 없이)."""
@@ -89,9 +115,13 @@ def build_prompt() -> str:
         "- companies: 위 목록의 법인명으로 정규화한다. '전체·모든·상장사' 류는",
         "  회사가 아니므로 companies 를 [] 로 둔다",
         "- fiscal_years: 질문이 가리키는 회계연도(정수). 모르면 []",
-        "- doc_groups: 질문이 공시 종류를 명시했을 때만 넣는다. 아니면 [].",
+        "- doc_groups: 질문이 공시 유형을 **명시적으로 말했을 때만** 채운다",
+        "  (\"주요사항보고서에서\", \"거래소 공시 중\", \"지분공시\" 등).",
         "  periodic(정기보고서)·exchange(거래소 수시공시)·major(주요사항보고서)·",
-        "  holding(지분공시) 중에서",
+        "  holding(지분공시) 중에서.",
+        "  **내용으로 추정하지 마라.** 소송·재무·이사회가 어디 실리는지 짐작해서",
+        "  채우면 안 된다 — 실제로 유형을 좁혔다가 정답 문서를 놓친 사례가 있다.",
+        "  확신이 없으면 빈 배열 [] 로 둔다",
         "- out_of_scope: 질문 시점이 2023.01~2026.03 밖이면 true",
         "- 확신이 없으면 비워라. 추측해 채우지 마라",
         "",
@@ -107,7 +137,8 @@ def build_prompt() -> str:
         '회계연도로 해석", "out_of_scope": false}',
         "",
         "[예시 2 — 질문: \"2023년 매출 1위는? 그리고 삼성전자의 2023년 배당은?\"]",
-        "(질문 둘 혼합 · 명시된 연도는 그대로)",
+        "(질문 둘 혼합 · 명시된 연도는 그대로 · 매출·배당·정정공시처럼 **내용**만",
+        " 있고 공시 유형을 말하지 않았으므로 doc_groups 는 빈 배열이다)",
         '{"rewritten": "2023 회계연도 매출액이 가장 큰 회사와 삼성전자의 2023 '
         '회계연도 배당 내용을 묻는다", "sub_questions": ["2023 회계연도 매출액이 '
         '가장 큰 회사는 어디인가?", "삼성전자의 2023 회계연도 배당은 어떠했는가?"], '
@@ -204,6 +235,8 @@ def rewrite_question(question, model=None, budget_s=None) -> dict:
         if a is None:
             out["note"] = "JSON 파싱 실패"
             return out
+        # 유형 추정 차단 — 질문이 명시하지 않은 doc_groups 는 여기서 걷어낸다
+        a["doc_groups"] = _filter_doc_groups(a.get("doc_groups"), q)
         out["ok"], out["analysis"] = True, a
         return out
     except Exception as e:                     # noqa: BLE001 — 마지막 방어선

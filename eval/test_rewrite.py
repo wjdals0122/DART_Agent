@@ -184,6 +184,39 @@ check("think_trace 에 '질문 분석 생략('", "질문 분석 생략(" in body
 
 print()
 print("=" * 74)
+print("5-B — doc_groups: 질문이 명시했을 때만 (추정은 코드가 걷어낸다)")
+print("=" * 74)
+check("명시 안 했으면 버린다 — 실측 사례",
+      R._filter_doc_groups(["periodic"],
+                           "2024년 영업이익이 가장 높은 회사는? 한화오션의 정정공시는?") == [])
+check("'사업보고서' 명시 → periodic 유지",
+      R._filter_doc_groups(["periodic"], "사업보고서에서 매출액을 찾아줘") == ["periodic"])
+check("'주요사항보고서' 명시 → major 유지",
+      R._filter_doc_groups(["major"], "주요사항보고서에서 자기주식취득 내용은?") == ["major"])
+check("'지분공시' 명시 → holding 유지",
+      R._filter_doc_groups(["holding"], "지분공시 중 국민연금 보유비율은?") == ["holding"])
+check("명시된 것만 남는다(혼합)",
+      R._filter_doc_groups(["periodic", "major"], "주요사항보고서 좀 봐줘") == ["major"])
+check("모르는 값은 버린다",
+      R._filter_doc_groups(["정기보고서", "x"], "정기보고서 봐줘") == [])
+check("지저분한 입력에도 예외 없음",
+      R._filter_doc_groups(None, None) == [] and R._filter_doc_groups([1, {}], "") == [])
+
+# rewrite_question 경로에서도 걷어내는지 — 모델이 periodic 을 추정해 온 상황
+GUESSY = json.dumps(dict(json.loads(GOOD_JSON), doc_groups=["periodic"]),
+                    ensure_ascii=False)
+fake, st = make_chat({"ok": True, "text": GUESSY, "tool_calls": [], "usage": {}})
+clova.chat = fake
+try:
+    rw = R.rewrite_question(ORIG_Q)
+finally:
+    clova.chat = real_chat
+check("rewrite_question 이 추정 doc_groups 를 걷어낸다",
+      rw["ok"] and rw["analysis"]["doc_groups"] == [],
+      str(rw["analysis"] and rw["analysis"]["doc_groups"]))
+
+print()
+print("=" * 74)
 print("6 — DART_REWRITE=0 이면 재작성을 부르지 않는다")
 print("=" * 74)
 os.environ["DART_REWRITE"] = "0"
