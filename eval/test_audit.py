@@ -28,7 +28,8 @@ from src.agent import clova, loop                      # noqa: E402
 from src.agent import usage as usage_mod               # noqa: E402
 
 usage_mod.set_enabled(False)                           # 비용 로그를 더럽히지 않는다
-from src.agent.loop import (all_tools_failed, answer,  # noqa: E402
+from src.agent.loop import (all_tools_failed,  # noqa: E402
+                            announced_but_not_called, answer,
                             needs_calc, refused_without_search)
 
 FAIL = []
@@ -113,6 +114,39 @@ check("'확인할 수 없' 도 거절로 본다",
 check("검문 2·4 가 동시에 참이 되지 않는다",
       not (refused_without_search("확인되지 않습니다.", bad("search_disclosure"))
            and all_tools_failed("확인되지 않습니다.", [])))
+
+print()
+print("=" * 74)
+print("2-C — 검문 5 판정: 부르겠다고 해 놓고 안 불렀나")
+print("=" * 74)
+
+REAL = ("이를 위해 search_disclosure 도구를 사용하여 해당 문서의 본문을 "
+        "검색하겠습니다.")
+check("실제 실패 문장을 잡는다 — 회귀 3번",
+      announced_but_not_called(REAL, tc("list_disclosures")))
+check("'해야 합니다' 도 잡는다",
+      announced_but_not_called("search_disclosure 로 본문을 확인해야 합니다.",
+                               tc("list_disclosures")))
+check("'조회하여' 도 잡는다",
+      announced_but_not_called("list_disclosures 로 목록을 조회하여 확인하겠습니다.", []))
+
+# --- 오탐 방어: 정상 답변 3종은 걸리면 안 된다 ---
+check("① 실제로 부른 도구를 언급하는 것은 정상",
+      not announced_but_not_called(
+          "search_disclosure 로 조회하여 확인한 결과 매출액은 300,870,903백만원입니다.",
+          tc("search_disclosure")))
+check("② 도구 이름 없이 예고 표현만 있으면 안 걸린다",
+      not announced_but_not_called("정확한 금액은 추가 확인이 필요합니다.",
+                                   tc("search_disclosure")))
+check("③ 도구 이름만 있고 예고 표현이 없으면 안 걸린다",
+      not announced_but_not_called("search_disclosure 결과 문서는 사업보고서였다.",
+                                   tc("list_disclosures")))
+check("예고 표현이 다른 문장에 있으면 안 걸린다",
+      not announced_but_not_called(
+          "search_disclosure 결과는 위와 같다. 추가 자료가 필요합니다.",
+          tc("list_disclosures")))
+check("도구 0회 + 예고만 있어도 도구 이름이 없으면 안 걸린다",
+      not announced_but_not_called("조회하여 확인하겠습니다.", []))
 
 print()
 print("=" * 74)
@@ -293,6 +327,65 @@ finally:
 check("데드라인 1초면 검문 4 를 건너뛴다", r7["waste"]["audit"] == "",
       repr(r7["waste"]["audit"]))
 check("그래도 답은 나온다", bool(r7["answer"].strip()), r7["answer"][:40])
+
+print()
+print("=" * 74)
+print("4-C — 검문 5 가 루프에서 딱 한 턴만 더 준다 (회귀 3번 재현)")
+print("=" * 74)
+
+
+def run_announced(texts, tool_status="ok"):
+    """list_disclosures 만 부르고, 답변에서 search_disclosure 를 부르겠다고 말한다."""
+    state = {"i": 0, "seen": []}
+
+    def fake(messages, **kw):
+        state["seen"].append([m.get("content") for m in messages])
+        i = state["i"]
+        state["i"] += 1
+        if i == 0 and kw.get("extra"):
+            return {"ok": True, "text": "", "finish_reason": "tool_calls", "usage": {},
+                    "tool_calls": [{"id": "c1", "type": "function",
+                                    "function": {"name": "list_disclosures",
+                                                 "arguments": {"corp_name": "KB금융"}}}]}
+        return {"ok": True, "text": texts[min(i - 1, len(texts) - 1)],
+                "tool_calls": [], "finish_reason": "stop", "usage": {}}
+
+    T.TOOLS = dict(real_tools)
+    T.TOOLS["list_disclosures"] = lambda **kw: {
+        "status": tool_status, "results": [{"rcept_no": "20260619000667"}],
+        "sources": [], "note": "이것은 문서 목록이며 내용이 아니다"}
+    clova.chat = fake
+    try:
+        return answer("KB금융 2025년 자기자본은?", deadline=50.0), state
+    finally:
+        clova.chat = real_chat
+        T.TOOLS = real_tools
+
+
+r8, st8 = run_announced([REAL])
+check("검문 5 가 걸렸다", r8["waste"]["audit"] == "announced", repr(r8["waste"]["audit"]))
+last8 = st8["seen"][-1]
+check("검문 5 지시가 들어갔다", any(loop.AUDIT_ANNOUNCED in (c or "") for c in last8))
+check("검문 5 지시는 한 번만", sum(1 for c in last8 if c == loop.AUDIT_ANNOUNCED) == 1)
+check("그래도 답은 나온다", bool(r8["answer"].strip()), r8["answer"][:40])
+
+# 배타 — 검문 4(전부 빗나감)와 동시에 걸리지 않는다. elif 사슬이라 하나만 남는다.
+r9, _ = run_announced(["공시에서 찾을 수 없습니다. search_disclosure 로 조회하겠습니다."],
+                      tool_status="not_found")
+check("검문 4·5 가 함께 걸리지 않는다 (하나만)",
+      r9["waste"]["audit"] in ("all_bad", "announced"), repr(r9["waste"]["audit"]))
+check("  먼저 오는 검문 4 가 잡는다", r9["waste"]["audit"] == "all_bad",
+      repr(r9["waste"]["audit"]))
+
+# 정상 답변(부른 도구를 언급)은 안 걸린다
+r10, st10 = run_announced(
+    ["list_disclosures 로 조회하여 확인한 결과 2025년 자기자본은 57,846십억 원입니다."])
+check("부른 도구를 언급하는 정상 답변은 안 걸린다", r10["waste"]["audit"] == "",
+      repr(r10["waste"]["audit"]))
+# 이 경로에서 턴이 하나 더 도는 것은 검문이 아니라 LIST_ONLY_NUDGE 다 —
+# list 만 ok 이고 본문 검색이 없으면 원래 한 번 되돌린다(step6-H). 검문 5 와 무관하다.
+check("  추가 턴은 LIST_ONLY_NUDGE 의 몫", r10["waste"]["list_only_nudge"] is True,
+      str({k: v for k, v in r10["waste"].items() if v}))
 
 print()
 print("=" * 74)

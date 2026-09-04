@@ -163,6 +163,20 @@ AUDIT_ALL_BAD = (
 # 검문 4 의 거절 표현. 지시가 이 셋을 지목했다.
 _ALL_BAD_REFUSE = ("확인되지 않", "찾을 수 없", "확인할 수 없")
 
+# 검문 5 — 도구를 부르겠다고 **말만 하고** 답변을 끝낼 때.
+#
+# 【왜 필요한가 — 2026-09-04 실측】
+# 회귀 3번(KB금융 자기자본)이 최근 5회 중 **2회** 이렇게 실패했다.
+#   list_disclosures -> ok · search_disclosure 를 부르지 않음
+#   답변: "…이를 위해 search_disclosure 도구를 사용하여 해당 문서의 본문을 검색하겠습니다."
+# `LIST_ONLY_NUDGE` 를 받고 그 지시를 **답변으로 되읊는다.** 잡음이 아니라 재현되는 유형이다.
+AUDIT_ANNOUNCED = (
+    "도구를 사용하겠다고 했으나 실제로 호출하지 않았다. 지금 그 도구를 호출하라. "
+    "설명하지 말고 호출만 하라."
+)
+_TOOL_NAMES = ("search_disclosure", "list_disclosures", "calculate", "resolve_company")
+_ANNOUNCE = ("하겠습니다", "해야 합니다", "필요합니다", "검색하여", "조회하여")
+
 # '4.55배' '234.73%' '3.06 퍼센트' 처럼 **숫자에 붙은** 비율·배수 표기만 잡는다.
 # 그냥 '배' 를 찾으면 배당·배출·배터리·분배가 전부 걸린다.
 _RATIO = re.compile(r"\d[\d,]*(?:\.\d+)?\s*(?:%|퍼센트|배)")
@@ -230,6 +244,33 @@ def all_tools_failed(text: str, tool_calls: list) -> bool:
         if any((c or {}).get("status") == "ok" for c in calls):
             return False
         return any(w in (text or "") for w in _ALL_BAD_REFUSE)
+    except Exception:                          # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        return False
+
+
+def announced_but_not_called(text: str, tool_calls: list) -> bool:
+    """도구를 부르겠다고 해 놓고 안 불렀나.
+
+    【오탐을 어떻게 막는가 — 세 조건을 다 만족해야 한다】
+      (1) 도구 이름이 나온다
+      (2) 예고 표현이 **같은 문장 안에** 있다
+      (3) 그 도구를 이번 문항에서 **부르지 않았다**
+
+    (2) 를 문장 단위로 본 이유 — "search_disclosure 로 조회한 결과 …입니다.
+    추가 확인이 필요합니다." 처럼 멀쩡한 답변에서 두 조각이 다른 문장에 흩어져
+    있을 수 있다. (3) 이 가장 강한 방어다. 실제로 부른 도구를 언급하는 것은
+    정상 답변이므로 절대 걸리지 않는다.
+    """
+    try:
+        called = {(c or {}).get("name") for c in (tool_calls or [])}
+        for sent in _SENT.findall(text or ""):
+            if not any(w in sent for w in _ANNOUNCE):
+                continue
+            for name in _TOOL_NAMES:
+                if name in sent and name not in called:
+                    return True
+        return False
     except Exception:                          # noqa: BLE001
         traceback.print_exc(file=sys.stderr)
         return False
@@ -877,6 +918,8 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
                     kind, note = "no_search", AUDIT_NO_SEARCH
                 elif all_tools_failed(text, out["tool_calls"]):
                     kind, note = "all_bad", AUDIT_ALL_BAD
+                elif announced_but_not_called(text, out["tool_calls"]):
+                    kind, note = "announced", AUDIT_ANNOUNCED
                 if kind:
                     audited = True
                     out["waste"]["audit"] = kind
