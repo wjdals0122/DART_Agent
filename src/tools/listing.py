@@ -202,13 +202,21 @@ def _ratios(counter: Counter, total: int) -> list:
 
 def list_disclosures(corp_name=None, doc_group=None, fiscal_year=None,
                      date_from=None, date_to=None, corrections_only=False,
-                     series_of=None, limit=50, **_ignored) -> dict:
+                     series_of=None, limit=50, ki=None, **_ignored) -> dict:
     """조건에 맞는 공시 목록과 건수·유형별 비중. 개별 공시 '내용' 은 돌려주지 않는다."""
     docs, smax = _load()
     out = {"status": "ok", "total": 0, "by_subtype": [],
            "by_correction": {"원본": 0, "기재정정": 0},
            "results": [], "sources": [], "note": ""}
     notes = []
+
+    # 제N기(기수) → 회계연도는 도구가 표로 환산한다(search_disclosure 와 같은 규칙).
+    # ki 가 오면 fiscal_year 보다 우선하고, 환산 불가면 연도 필터를 걸지 않는다.
+    if ki is not None and str(ki).strip() != "":
+        from src.agent.context import fiscal_year_of_ki
+        y, ki_note = fiscal_year_of_ki(corp_name, ki)
+        fiscal_year = y
+        notes.append(ki_note)
 
     sel = docs
     if series_of:

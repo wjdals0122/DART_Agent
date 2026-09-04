@@ -142,6 +142,65 @@ REVIEW = (
 AUDIT_MARGIN = 20.0         # 남은 시간이 이보다 적으면 검문을 건너뛴다
                             # (데드라인 200초 기준. 검문 한 턴 = LLM 1회 ≈ 5~15초)
 
+# 모든 검문 메시지 끝에 붙는 공통 꼬리 — e2e_v5 실측 3건(4·19·22)에서 모델이
+# 검문 지시를 **답변 본문으로 되읊었다**("앞서 제공한 답변에서 … calculate 도구를
+# 사용하여 …"). 심지어 프롬프트 예시(ㅇㅇ전자 300,870,903)를 통째로 누출했다.
+AUDIT_TAIL = (
+    "이전 답변을 언급하지 마라. 수정 과정을 설명하지 마라. "
+    "도구 이름을 답변에 쓰지 마라. 최종 답변만 처음부터 완성된 형태로 출력하라."
+)
+
+# 프롬프트 예시의 자리표시자. 답변에 나오면 예시를 베낀 것이다 — 항상 걷어낸다.
+PLACEHOLDERS = ("ㅇㅇ전자", "△△전자", "○○기업", "△△지주", "XXXXXX")
+# 검문 후 답변이 이 말로 시작하거나 첫 문단에 품으면 지시를 되읊은 것이다
+_ECHO_WORDS = ("앞서", "이전 답변", "수정하여", "다시 작성")
+_TOOL_WORDS = ("search_disclosure", "calculate", "list_disclosures")
+
+
+def audit_degraded(new: str, prev: str) -> bool:
+    """검문 후 답변이 검문 전보다 나빠졌나. True 면 검문 전 답변으로 되돌린다.
+
+    실측(e2e_v5 4·19·22): 검문을 받은 모델이 답을 고치는 대신 검문 지시를
+    설명하는 메타 발화를 내놓았다 — 19번은 644억을 찾아 놓고 형식이 깨져 못 썼다.
+    """
+    try:
+        body = (new or "").strip()
+        if not body:
+            return True
+        first_para = body.split("\n\n")[0]
+        if any(w in first_para for w in _ECHO_WORDS):
+            return True
+        if any(t in body for t in _TOOL_WORDS):
+            return True
+        if any(p in body for p in PLACEHOLDERS):
+            return True
+        prev_s = (prev or "")
+        had = ("\n근거" in prev_s) or bool(_RCEPT.search(prev_s))
+        has = ("\n근거" in body) or bool(_RCEPT.search(body))
+        if had and not has:
+            return True
+        return False
+    except Exception:                          # noqa: BLE001 — 판정 실패면 새 답을 그대로 쓴다
+        traceback.print_exc(file=sys.stderr)
+        return False
+
+
+def strip_placeholders(text: str) -> str:
+    """자리표시자(ㅇㅇ전자 등)가 든 문단을 제거한다. 검문과 무관하게 항상 적용.
+
+    남는 것이 없으면 빈 문자열을 돌려준다 — 부르는 쪽이 FALLBACK 으로 바꾼다.
+    """
+    try:
+        if not any(x in (text or "") for x in PLACEHOLDERS):
+            return (text or "").strip()        # 누출 없으면 원문 그대로(공백만 정리)
+        paras = re.split(r"\n\s*\n", text or "")
+        kept = [p for p in paras
+                if p.strip() and not any(x in p for x in PLACEHOLDERS)]
+        return "\n\n".join(kept).strip()
+    except Exception:                          # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        return text or ""
+
 AUDIT_CALC = (
     "답변에 비율·배수 표현이 있으나 calculate 를 사용하지 않았다. "
     "calculate 로 값을 구한 뒤 답변을 다시 작성하라."
@@ -802,7 +861,11 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
                      "answered_without_tools": False,
                      # 최종 답변 검문이 걸렸으면 그 종류 —
                      # calc·compare·no_search·all_bad·announced 중 하나
-                     "audit": ""},
+                     "audit": "",
+                     # 검문 후 답변이 되읊기·형식 붕괴라 검문 전 것으로 되돌렸나
+                     "audit_reverted": False,
+                     # 자리표시자 문단을 걷어냈나
+                     "placeholder_stripped": False},
            # 질문 재작성 단계의 결과. _rewrite_step 이 채운다 — 그 전에 죽어도
            # 키는 있어야 서버 trace 가 "생략" 을 적을 수 있다
            "rewrite": {"ok": False, "note": "실행 안 됨", "analysis": None,
@@ -825,6 +888,16 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
     except Exception as e:                     # noqa: BLE001
         traceback.print_exc(file=sys.stderr)
         out["note"] = (out.get("note") or "") + f" · 상투구 제거 실패: {e}"
+    # 자리표시자(프롬프트 예시) 누출은 검문과 무관하게 항상 막는다 (1-B c).
+    # e2e_v5 4번에서 예시의 'ㅇㅇ전자 300,870,903' 이 답변으로 나갔다.
+    try:
+        cleaned = strip_placeholders(out["answer"])
+        if cleaned != (out["answer"] or "").strip():
+            out["waste"]["placeholder_stripped"] = True
+            out["answer"] = cleaned or (FALLBACK + " (사유: 답변이 예시 자리표시자뿐이었다)")
+    except Exception as e:                     # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        out["note"] = (out.get("note") or "") + f" · 자리표시자 제거 실패: {e}"
     # 근거 절은 모델이 아니라 여기서 만든다. 형식이 흔들리면 안 된다.
     #
     # 【retrieved 를 따로 붙드는 이유 — 2026-09-03】
@@ -952,6 +1025,8 @@ def _rewrite_step(question, out, model, qid) -> str:
             out["llm_seconds"] += rw["elapsed"]
             if rw.get("res") is not None:
                 _account(out, rw["res"], clova.resolve_model(model), qid)
+            if rw.get("res_retry") is not None:    # 파싱 실패 재시도도 부른 것이다
+                _account(out, rw["res_retry"], clova.resolve_model(model), qid)
             if rw["ok"]:
                 block = rewrite_mod.analysis_block(rw["analysis"])
     except Exception as e:                     # noqa: BLE001 — 이 단계가 답을 막으면 안 된다
@@ -959,6 +1034,33 @@ def _rewrite_step(question, out, model, qid) -> str:
         info["note"] = f"{type(e).__name__}: {e}"
     out["rewrite"] = info
     return block
+
+
+# calculate 에 들어간 긴 숫자가 검색 결과(또는 질문 원문)에 실제로 있는지 본다.
+#
+# 【왜 — e2e_v5 39번 실측】 검색 결과에서 10,147,727 을 정확히 읽고 calculate 에
+# 100147727(0 하나 더)을 넣어 차액이 90,347,727 이 됐다. 값은 맞게 찾았는데
+# 옮겨 적다 틀린 것이다. 계산은 막지 않는다 — note 로 대조를 시킨다.
+_LONG_NUM = re.compile(r"\d{6,}")
+
+
+def _calc_transcribe_note(args, documents, question) -> str:
+    """expression 의 6자리 이상 숫자 중 검색 결과·질문에 없는 것을 짚는다. 예외 없음."""
+    try:
+        expr = str((args or {}).get("expression") or "").replace(",", "")
+        nums = set(_LONG_NUM.findall(expr))
+        if not nums:
+            return ""
+        hay = "\n".join(str((d or {}).get("text") or "") for d in (documents or []))
+        hay = (hay + "\n" + str(question or "")).replace(",", "")
+        missing = sorted(n for n in nums if n not in hay)
+        if not missing:
+            return ""
+        return (", ".join(missing) + " 은(는) 검색 결과에 없는 숫자다. "
+                "옮겨 적기 오류일 수 있으니 원문과 대조하라")
+    except Exception:                          # noqa: BLE001 — 안내가 계산을 막으면 안 된다
+        traceback.print_exc(file=sys.stderr)
+        return ""
 
 
 def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> dict:
@@ -976,7 +1078,21 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
     nudged = False             # 조회 없이 답하려는 것을 되돌리는 지시도 한 번만
     list_only_nudged = False   # 목록만 보고 본문에 답하려는 경로도 한 번만
     audited = False            # 최종 답변 검문도 문항당 한 번만 — 무한 루프 금지
+    # 되돌림 지시(검문·FORCE_TOOL·REVIEW·LIST_ONLY_NUDGE) 직전의 답변.
+    # 지시를 받은 모델이 답을 고치는 대신 지시를 **되읊으면**(실측: "앞서 제공한
+    # 답변은 …") 이전 답변으로 되돌린다. 검문만 막았더니 nudge 경로에서 같은
+    # 유형이 재발해(검증 중 실측) 네 경로 전부에 적용한다.
+    prev_answer = None
     bad_tools: set = set()     # 직전 턴에 error/not_found 를 돌려준 도구 이름
+
+    def accept(text: str) -> str:
+        """최종 답변 확정. 되돌림 지시 후 답변이 되읊기·형식 붕괴면 이전 것으로."""
+        if prev_answer is not None and audit_degraded(text, prev_answer):
+            out["waste"]["audit_reverted"] = True
+            out["note"] = ((out["note"] + " · ") if out["note"] else "") + \
+                "검문 후 답변 품질 저하로 검문 전 답변 사용"
+            return prev_answer
+        return text
 
     while True:
         # 비용 상한 — LLM 을 부르기 **전에** 본다. 부르고 나서 보면 이미 쓴 뒤다.
@@ -1009,12 +1125,14 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
             if extra is not None and not out["tool_calls"]:
                 if not nudged:
                     nudged = True
+                    prev_answer = text
                     out["waste"]["no_tool_nudge"] = True
                     msgs.append({"role": "assistant", "content": text})
                     msgs.append({"role": "user", "content": FORCE_TOOL})
                     continue
                 if not reviewed:
                     reviewed = True
+                    prev_answer = text
                     msgs.append({"role": "assistant", "content": text})
                     msgs.append({"role": "user", "content": REVIEW})
                     continue
@@ -1027,6 +1145,7 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
                                for c in out["tool_calls"])
                 if listed and not searched:
                     list_only_nudged = True
+                    prev_answer = text
                     out["waste"]["list_only_nudge"] = True
                     msgs.append({"role": "assistant", "content": text})
                     msgs.append({"role": "user", "content": LIST_ONLY_NUDGE})
@@ -1049,17 +1168,19 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
                     kind, note = "announced", AUDIT_ANNOUNCED
                 if kind:
                     audited = True
+                    prev_answer = text         # 되읊기 방어용 보관 (1-B)
                     out["waste"]["audit"] = kind
                     msgs.append({"role": "assistant", "content": text})
-                    msgs.append({"role": "user", "content": note})
+                    # 공통 꼬리 — 검문 지시를 답변으로 되읊는 것을 막는다
+                    msgs.append({"role": "user", "content": note + "\n" + AUDIT_TAIL})
                     continue
 
-            out["answer"] = text
+            out["answer"] = accept(text)
             if not out["tool_calls"]:
                 out["waste"]["answered_without_tools"] = True
             break
         if extra is None:
-            out["answer"] = (res.get("text") or "").strip()
+            out["answer"] = accept((res.get("text") or "").strip())
             break
 
         # assistant 가 무엇을 불렀는지 그대로 되돌려 놓아야 tool 메시지가 이어진다
@@ -1107,6 +1228,15 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
 
             if tool_out.get("status") in ("error", "not_found"):
                 bad_tools.add(name)
+
+            # calculate 입력 검증(1-C) — 계산은 그대로 두고 note 로만 짚는다
+            if name == "calculate":
+                warn = _calc_transcribe_note(args, out["documents"], question)
+                if warn:
+                    tool_out = dict(tool_out)
+                    tool_out["note"] = ((tool_out.get("note") or "")
+                                        + (" · " if tool_out.get("note") else "")
+                                        + warn)
 
             for s in (tool_out.get("sources") or []):
                 if s not in out["sources"]:

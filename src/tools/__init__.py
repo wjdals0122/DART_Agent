@@ -79,12 +79,21 @@ EMPTY_QUERY_NOTE = (
 
 def _search_disclosure(query=None, corp_name=None, fiscal_year=None, rcept_no=None,
                        rcept_dt=None, date_from=None, date_to=None, doc_group=None,
-                       report_type=None, top_k=5, include_superseded=False) -> dict:
+                       report_type=None, top_k=5, include_superseded=False,
+                       ki=None) -> dict:
     """기존 Retriever 를 그대로 부른다. 인덱스가 무거우므로 여기서 늦게 임포트한다."""
     from src.search.hybrid import get_searcher
 
     if query is None or not str(query).strip():
         return {"status": "error", "note": EMPTY_QUERY_NOTE}
+    # 제N기(기수)는 도구가 표로 환산한다 — 모델이 짐작으로 환산해 틀린 실측 4건.
+    # ki 와 fiscal_year 가 함께 오면 ki 를 우선한다. 환산 불가면 연도 필터 없이 간다.
+    ki_note = ""
+    if ki is not None and str(ki).strip() != "":
+        from src.agent.context import fiscal_year_of_ki
+
+        y, ki_note = fiscal_year_of_ki(corp_name, ki)
+        fiscal_year = y                        # None 이면 연도 필터를 걸지 않는다
     if rcept_no:
         # 접수번호 검증은 list_disclosures 와 **같은 함수**를 쓴다.
         # 두 곳에서 따로 판단하면 안내가 갈리고, 모델은 갈린 안내를 못 고친다.
@@ -105,6 +114,8 @@ def _search_disclosure(query=None, corp_name=None, fiscal_year=None, rcept_no=No
     res.pop("pool", None)                      # LLM 에게 줄 것이 아니다
     res["sources"] = _sources(res.get("results") or [])
     _explain_empty(res, rcept_dt, fiscal_year)
+    if ki_note:
+        res["note"] = (ki_note + (" · " + res["note"] if res.get("note") else ""))
     return res
 
 

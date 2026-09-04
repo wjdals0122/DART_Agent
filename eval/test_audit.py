@@ -214,6 +214,68 @@ check("비교 표현이 없으면 안 잡는다",
 
 print()
 print("=" * 74)
+print("2-E — 검문 되읊기 방어(audit_degraded)·자리표시자 제거 (step39)")
+print("=" * 74)
+
+PREV = ("2024년 계약금액은 644억원이다 [HD현대일렉트릭 사업보고서 (2024.12), "
+        "2025-03-20, 접수번호 20250320001234].\n\n근거\n- [HD현대일렉트릭 …]")
+check("'앞서 제공한 답변에서…' 되읊기를 잡는다 — 실측 4번",
+      loop.audit_degraded("앞서 제공한 답변에서 두 회사의 매출을 비교하는 부분에 "
+                          "대해 도구를 사용하여 다시 계산했습니다.", PREV))
+check("도구 이름이 본문에 나오면 잡는다 — 실측 19번",
+      loop.audit_degraded("계약 금액의 변경 비율을 calculate 도구로 구했습니다.", PREV))
+check("자리표시자 누출을 잡는다",
+      loop.audit_degraded("ㅇㅇ전자의 매출은 300,870,903백만원입니다.", PREV))
+check("근거가 사라지면 잡는다",
+      loop.audit_degraded("계약금액은 644억원이다.", PREV))
+check("멀쩡히 고친 답변은 안 잡는다",
+      not loop.audit_degraded(
+          "2024년 최종 계약금액은 644억원이다 [HD현대일렉트릭 사업보고서 (2024.12), "
+          "2025-03-20, 접수번호 20250320001234].", PREV))
+check("검문 전 답변에 근거가 없었으면 근거 조건은 안 본다",
+      not loop.audit_degraded("영업이익은 9,716억원이다.", "확인 중이다."))
+for args in ((None, None), ("", ""), (None, PREV)):
+    try:
+        loop.audit_degraded(*args)
+        ok = True
+    except Exception:                          # noqa: BLE001
+        ok = False
+    check(f"audit_degraded{args!r:.30s} 예외 없음", ok)
+
+check("자리표시자 문단만 지운다",
+      loop.strip_placeholders("실제 값은 644억원이다.\n\nㅇㅇ전자의 매출은 "
+                              "300,870,903백만원입니다.\n\n끝 문단이다.")
+      == "실제 값은 644억원이다.\n\n끝 문단이다.")
+check("XXXXXX 접수번호도 걷어낸다",
+      "XXXXXX" not in loop.strip_placeholders("근거: 접수번호 20250311XXXXXX 문단.\n\n정상."))
+check("전부 자리표시자면 빈 문자열", loop.strip_placeholders("△△전자 어쩌고") == "")
+check("자리표시자 없으면 그대로",
+      loop.strip_placeholders("정상 문단 하나.") == "정상 문단 하나.")
+
+print()
+print("=" * 74)
+print("2-F — calculate 옮겨 적기 검증 (step39 · 실측 39번)")
+print("=" * 74)
+
+DOCS39 = [{"chunk_id": "c1", "text": "매출액 10,147,727 백만원, 경쟁사는 9,800,000"}]
+check("검색 결과에 없는 긴 숫자를 짚는다 — 0 하나 더 붙인 실측",
+      "100147727" in loop._calc_transcribe_note(
+          {"expression": "100147727-9800000"}, DOCS39, "질문"))
+check("문서에 있는 숫자는 안 짚는다(쉼표 무관)",
+      loop._calc_transcribe_note(
+          {"expression": "10147727-9800000"}, DOCS39, "질문") == "")
+check("질문 원문의 가상 경쟁사 값도 인정한다",
+      loop._calc_transcribe_note(
+          {"expression": "10147727-9800000"},
+          [{"chunk_id": "c1", "text": "매출액 10,147,727"}],
+          "경쟁사가 9,800,000백만원이라는데 비교해줘") == "")
+check("6자리 미만 숫자는 안 본다",
+      loop._calc_transcribe_note({"expression": "123+456"}, [], "질문") == "")
+check("지저분한 입력 예외 없음",
+      loop._calc_transcribe_note(None, None, None) == "")
+
+print()
+print("=" * 74)
 print("3 — 지저분한 입력에도 예외를 안 던진다")
 print("=" * 74)
 
@@ -278,7 +340,10 @@ check("검문이 no_search 로 기록된다", r["waste"]["audit"] == "no_search"
       repr(r["waste"]["audit"]))
 last = st["seen"][-1]
 check("검문 지시가 실제로 들어갔다", any(loop.AUDIT_NO_SEARCH in (c or "") for c in last))
-check("검문 지시는 한 번만", sum(1 for c in last if c == loop.AUDIT_NO_SEARCH) == 1)
+check("검문 지시는 한 번만",
+      sum(1 for c in last if loop.AUDIT_NO_SEARCH in (c or "")) == 1)
+check("공통 꼬리(AUDIT_TAIL)가 붙는다",
+      any(loop.AUDIT_TAIL in (c or "") for c in last))
 check("그래도 답은 나온다", bool(r["answer"].strip()), r["answer"][:40])
 
 # 검문 1 경로: 두 번째 턴에서 비율을 고쳐도, 안 고쳐도 한 번만 돈다
@@ -337,7 +402,8 @@ r5, st5 = run_all_bad(["공시에서 찾을 수 없습니다."])
 check("검문 4 가 걸렸다", r5["waste"]["audit"] == "all_bad", repr(r5["waste"]["audit"]))
 last = st5["seen"][-1]
 check("검문 4 지시가 들어갔다", any(loop.AUDIT_ALL_BAD in (c or "") for c in last))
-check("검문 4 지시는 한 번만", sum(1 for c in last if c == loop.AUDIT_ALL_BAD) == 1)
+check("검문 4 지시는 한 번만",
+      sum(1 for c in last if loop.AUDIT_ALL_BAD in (c or "")) == 1)
 check("그래도 답은 나온다", bool(r5["answer"].strip()), r5["answer"][:40])
 check("LLM 3회 이하(도구턴 + 답변 + 검문 뒤 답변)", st5["usage"] if False else
       (r5["usage"]["llm_calls"] <= 3), str(r5["usage"]["llm_calls"]))
@@ -439,7 +505,8 @@ r8, st8 = run_announced([REAL])
 check("검문 5 가 걸렸다", r8["waste"]["audit"] == "announced", repr(r8["waste"]["audit"]))
 last8 = st8["seen"][-1]
 check("검문 5 지시가 들어갔다", any(loop.AUDIT_ANNOUNCED in (c or "") for c in last8))
-check("검문 5 지시는 한 번만", sum(1 for c in last8 if c == loop.AUDIT_ANNOUNCED) == 1)
+check("검문 5 지시는 한 번만",
+      sum(1 for c in last8 if loop.AUDIT_ANNOUNCED in (c or "")) == 1)
 check("그래도 답은 나온다", bool(r8["answer"].strip()), r8["answer"][:40])
 
 # 배타 — 검문 4(전부 빗나감)와 동시에 걸리지 않는다. elif 사슬이라 하나만 남는다.
@@ -497,7 +564,8 @@ r11, st11 = run_compare([COMPARE])
 check("검문 6 가 걸렸다", r11["waste"]["audit"] == "compare", repr(r11["waste"]["audit"]))
 last11 = st11["seen"][-1]
 check("검문 6 지시가 들어갔다", any(loop.AUDIT_COMPARE in (c or "") for c in last11))
-check("검문 6 지시는 한 번만", sum(1 for c in last11 if c == loop.AUDIT_COMPARE) == 1)
+check("검문 6 지시는 한 번만",
+      sum(1 for c in last11 if loop.AUDIT_COMPARE in (c or "")) == 1)
 check("한 턴만 더 돈다 (LLM 3회)", st11["i"] == 3, f"{st11['i']}회")
 check("그래도 답은 나온다", bool(r11["answer"].strip()), r11["answer"][:40])
 

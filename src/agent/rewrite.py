@@ -31,6 +31,7 @@ import re
 import sys
 import time
 import traceback
+from pathlib import Path
 
 REWRITE_BUDGET_S = 15.0
 MAX_TOKENS = 1024
@@ -41,10 +42,27 @@ _DEFAULTS = {
     "sub_questions": [],
     "companies": [],
     "fiscal_years": [],
+    "ki": [],
     "doc_groups": [],
     "time_note": "",
     "out_of_scope": False,
 }
+
+# 재작성 실패 원본 기록. e2e_v5 에서 3/40 이 파싱 실패로 생략됐는데 원본이
+# 안 남아 원인을 못 짚었다(재현으로 확인: JSON 없이 산문만 출력하는 형식 이탈).
+_ROOT = Path(__file__).resolve().parents[2]
+FAIL_LOG = _ROOT / "logs" / "rewrite_fail.jsonl"
+
+
+def _log_fail(question, text, note) -> None:
+    try:
+        FAIL_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(FAIL_LOG, "a", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                 "note": note, "question": str(question)[:500],
+                                 "text": str(text)[:4000]}, ensure_ascii=False) + "\n")
+    except Exception:                          # noqa: BLE001 — 로그가 답을 막으면 안 된다
+        traceback.print_exc(file=sys.stderr)
 
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.M)
 
@@ -95,10 +113,10 @@ def build_prompt() -> str:
         "- 법인명 목록 (companies 에는 이 표기만 쓴다):",
         "  " + _corp_names(),
         "",
-        "[출력 JSON — 이 7개 키를 전부 넣는다]",
+        "[출력 JSON — 이 8개 키를 전부 넣는다]",
         '{"rewritten": "질문을 명확하게 다시 쓴 문장", "sub_questions": ["..."],',
-        ' "companies": [], "fiscal_years": [], "doc_groups": [], "time_note": "",',
-        ' "out_of_scope": false}',
+        ' "companies": [], "fiscal_years": [], "ki": [], "doc_groups": [],',
+        ' "time_note": "", "out_of_scope": false}',
         "",
         "[규칙]",
         "- rewritten: 상대 시점을 절대 시점으로, 축약 회사명을 정식 법인명으로,",
@@ -115,6 +133,9 @@ def build_prompt() -> str:
         "- companies: 위 목록의 법인명으로 정규화한다. '전체·모든·상장사' 류는",
         "  회사가 아니므로 companies 를 [] 로 둔다",
         "- fiscal_years: 질문이 가리키는 회계연도(정수). 모르면 []",
+        "- ki: '제50기' 같은 기수의 N(정수). **제N기는 fiscal_years 가 아니라",
+        "  ki 에 넣는다. 연도로 환산하지 마라** — 도구가 회사별 표로 환산한다.",
+        "  기수 언급이 없으면 []",
         "- doc_groups: 질문이 공시 유형을 **명시적으로 말했을 때만** 채운다",
         "  (\"주요사항보고서에서\", \"거래소 공시 중\", \"지분공시\" 등).",
         "  periodic(정기보고서)·exchange(거래소 수시공시)·major(주요사항보고서)·",
@@ -182,7 +203,7 @@ def _parse(text: str):
             if isinstance(dv, list):
                 v = [x for x in v if isinstance(x, (str, int, float))] \
                     if isinstance(v, list) else []
-                if k == "fiscal_years":
+                if k in ("fiscal_years", "ki"):
                     ys = []
                     for x in v:
                         try:
@@ -212,17 +233,18 @@ def rewrite_question(question, model=None, budget_s=None) -> dict:
     """
     if budget_s is None:
         budget_s = REWRITE_BUDGET_S
-    out = {"ok": False, "analysis": None, "note": "", "res": None, "elapsed": 0.0}
+    out = {"ok": False, "analysis": None, "note": "", "res": None,
+           "res_retry": None, "elapsed": 0.0}
     try:
         q = str(question or "").strip()
         if not q:
             out["note"] = "질문이 비어 있다"
             return out
         from src.agent import clova
+        msgs = [{"role": "system", "content": build_prompt()},
+                {"role": "user", "content": q}]
         t0 = time.time()
-        res = clova.chat([{"role": "system", "content": build_prompt()},
-                          {"role": "user", "content": q}],
-                         max_tokens=MAX_TOKENS, temperature=0.1, model=model)
+        res = clova.chat(msgs, max_tokens=MAX_TOKENS, temperature=0.1, model=model)
         out["elapsed"] = round(time.time() - t0, 2)
         out["res"] = res
         if not res.get("ok"):
@@ -233,10 +255,32 @@ def rewrite_question(question, model=None, budget_s=None) -> dict:
             return out
         a = _parse(res.get("text") or "")
         if a is None:
-            out["note"] = "JSON 파싱 실패"
-            return out
+            # 실측(e2e_v5 3/40): JSON 없이 산문만 출력하는 형식 이탈. 파서로는
+            # 구제 불가라 원본을 남기고 **같은 입력으로 한 번만** 다시 부른다.
+            _log_fail(q, res.get("text"), "JSON 파싱 실패(1차)")
+            time.sleep(2.0)
+            res2 = clova.chat(msgs, max_tokens=MAX_TOKENS, temperature=0.1,
+                              model=model)
+            out["elapsed"] = round(time.time() - t0, 2)
+            out["res_retry"] = res2            # 토큰 회계용 — 부른 건 부른 것이다
+            if res2.get("ok"):
+                a = _parse(res2.get("text") or "")
+            if a is None:
+                if res2.get("ok"):
+                    _log_fail(q, res2.get("text"), "JSON 파싱 실패(재시도)")
+                out["note"] = "JSON 파싱 실패(재시도 포함)"
+                return out
         # 유형 추정 차단 — 질문이 명시하지 않은 doc_groups 는 여기서 걷어낸다
         a["doc_groups"] = _filter_doc_groups(a.get("doc_groups"), q)
+        # 기수 가드 — fiscal_years 에 1900 미만 값이 오면 그것은 연도가 아니라
+        # 기수다(실측: "제50기" → fiscal_years=[50] → 검색 6회 전부 0건).
+        # ki 로 옮기고 fiscal_years 에서 뺀다. 환산은 도구가 표로 한다.
+        kis = list(a.get("ki") or [])
+        years = []
+        for y in (a.get("fiscal_years") or []):
+            (kis if y < 1900 else years).append(y)
+        a["fiscal_years"] = years
+        a["ki"] = sorted(set(kis))
         out["ok"], out["analysis"] = True, a
         return out
     except Exception as e:                     # noqa: BLE001 — 마지막 방어선
@@ -249,7 +293,8 @@ def analysis_block(a: dict) -> str:
     """시스템 프롬프트에 붙일 [질문 분석] 블록. analysis 가 비면 빈 문자열."""
     try:
         if not a or not (a.get("rewritten") or a.get("companies")
-                         or a.get("fiscal_years") or a.get("time_note")):
+                         or a.get("fiscal_years") or a.get("ki")
+                         or a.get("time_note")):
             return ""
         L = ["[질문 분석 — 사전 분석기의 참고 정보]"]
         if a.get("rewritten"):
@@ -263,6 +308,10 @@ def analysis_block(a: dict) -> str:
                      + " (corp_name 필터에 이 법인명을 쓴다)")
         if a.get("fiscal_years"):
             L.append("- 회계연도: " + "·".join(str(y) for y in a["fiscal_years"]))
+        if a.get("ki"):
+            L.append("- 기수: " + "·".join(f"제{k}기" for k in a["ki"])
+                     + " — 도구 호출에 ki=" + ",".join(str(k) for k in a["ki"])
+                     + " 로 넣어라. 연도로 짐작 환산하지 마라")
         if a.get("doc_groups"):
             L.append("- 공시 종류: " + "·".join(a["doc_groups"]))
         if a.get("time_note"):

@@ -58,6 +58,7 @@ import json
 import os
 import re
 import sys
+import traceback
 from pathlib import Path
 
 # 경고는 stderr 로 나가는데, 윈도우 콘솔 기본 코드페이지(cp949)에서는 한글이 깨진다.
@@ -291,6 +292,68 @@ def _stale_reason():
         return None
     return ("주의: 표보다 새 입력이 있다 — " + ", ".join(newer[:3])
             + " · 다시 만들려면 python -m src.agent.context --build")
+
+
+# ---------------------------------------------------------------- 기수 → 연도 역조회
+#
+# 【왜 — 2026-09-04 e2e_v5 실측 4건】
+# "제50기" 질문에서 재작성·planner 가 기수를 **짐작으로** 연도 환산했다
+# (fiscal_year=50 으로 검색해 6회 전부 0건, "제76기"→2023 으로 오환산 등).
+# 표(doc_fiscal_map)가 있는데 안 썼다. 도구가 여기서 결정적으로 환산한다.
+# 사전 확인(step39): 회사별 ki→연도는 70개사 전부에서 **충돌 0건**(1:1).
+_KI_TABLE = None       # stock_code -> {current_ki: fiscal_year}
+
+
+def _ki_table() -> dict:
+    """doc_fiscal_map + manifest 를 조인해 회사별 (기수 → 회계연도) 표를 만든다."""
+    global _KI_TABLE
+    if _KI_TABLE is not None:
+        return _KI_TABLE
+    tbl: dict = {}
+    try:
+        ok, _msg = ensure_doc_map()
+        if ok:
+            d = json.loads(DOC_MAP_PATH.read_text(encoding="utf-8"))
+            code_of = {}
+            with open(MANIFEST_PATH, encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    m = json.loads(line)
+                    code_of[str(m.get("rcept_no"))] = str(m.get("stock_code") or "")
+            for v in d.values():
+                code = code_of.get(str(v.get("rcept_no")))
+                ki, fy = v.get("current_ki"), v.get("fiscal_year")
+                if code and ki and fy:
+                    tbl.setdefault(code, {})[int(ki)] = int(fy)
+    except Exception:           # noqa: BLE001 — 표가 없으면 환산 불가로 처리하면 된다
+        traceback.print_exc(file=sys.stderr)
+    _KI_TABLE = tbl
+    return tbl
+
+
+def fiscal_year_of_ki(corp_name, ki):
+    """(회계연도|None, 안내문). 회사와 기수로 표를 역조회한다. 예외 없음.
+
+    성공: (2025, "제50기를 2025 회계연도로 환산했다")
+    실패: (None, "제50기 환산 불가, 연도 필터 없이 검색") — 짐작으로 채우지 않는다.
+    """
+    try:
+        n = int(str(ki).strip())
+    except (TypeError, ValueError):
+        return None, f"ki={ki!r} 환산 불가(정수가 아니다), 연도 필터 없이 검색"
+    try:
+        from src.search.aliases import resolve_company
+        r = resolve_company(str(corp_name or ""))
+        if r.get("status") != "ok":
+            return None, f"제{n}기 환산 불가(회사를 특정하지 못함), 연도 필터 없이 검색"
+        y = _ki_table().get(str(r["stock_code"]), {}).get(n)
+        if y is None:
+            return None, f"제{n}기 환산 불가(표에 없음), 연도 필터 없이 검색"
+        return y, f"제{n}기를 {y} 회계연도로 환산했다"
+    except Exception as e:      # noqa: BLE001 — 환산 실패가 검색을 막으면 안 된다
+        traceback.print_exc(file=sys.stderr)
+        return None, f"제{n}기 환산 불가({type(e).__name__}), 연도 필터 없이 검색"
 
 
 def _doc_map():

@@ -74,6 +74,40 @@ def main() -> int:
           spy.called.get("rcept_dt_to") == "20250225", str(spy.called))
     check("날짜 범위 호출 모양 정상", shape_ok(out), str(out))
 
+    # ki(기수) → 회계연도 환산 (step39 · 실측: 제50기를 fiscal_year=50 으로 검색)
+    print("\n--- ki(기수) 환산 ---")
+    from src.agent.context import fiscal_year_of_ki
+    y, note = fiscal_year_of_ki("OCI홀딩스", 50)
+    check("  OCI홀딩스 제50기 → 연도 환산", isinstance(y, int) and 2023 <= y <= 2026,
+          f"{y} · {note}")
+    check("  성공 note 문구", "회계연도로 환산했다" in note, note)
+    y2, note2 = fiscal_year_of_ki("OCI홀딩스", 999)
+    check("  표에 없는 기수 → None + 환산 불가", y2 is None and "환산 불가" in note2, note2)
+    y3, note3 = fiscal_year_of_ki("없는회사명", 10)
+    check("  미상 회사 → None + 환산 불가", y3 is None and "환산 불가" in note3, note3)
+    y4, note4 = fiscal_year_of_ki("삼성전자", "abc")
+    check("  정수 아님 → None + 예외 없음", y4 is None, note4)
+
+    hybrid.get_searcher = lambda: spy
+    try:
+        out = TOOLS["search_disclosure"](query="매출액", corp_name="OCI홀딩스", ki=50)
+        check("  ki → fiscal_year 로 환산돼 전달", spy.called.get("fiscal_year") == y,
+              str(spy.called.get("fiscal_year")))
+        check("  note 에 환산 결과", "회계연도로 환산했다" in (out.get("note") or ""),
+              out.get("note"))
+        out2 = TOOLS["search_disclosure"](query="매출액", corp_name="OCI홀딩스",
+                                          ki=999, fiscal_year=2024)
+        check("  ki 가 fiscal_year 보다 우선(환산 불가면 연도 필터 없음)",
+              spy.called.get("fiscal_year") is None, str(spy.called.get("fiscal_year")))
+        check("  환산 불가 note", "환산 불가" in (out2.get("note") or ""), out2.get("note"))
+    finally:
+        hybrid.get_searcher = real_get_searcher
+    lst = TOOLS["list_disclosures"](corp_name="OCI홀딩스", ki=50)
+    check("  list_disclosures 도 ki 환산", "회계연도로 환산했다" in (lst.get("note") or ""),
+          (lst.get("note") or "")[:60])
+    check("  list 결과가 그 연도 정기공시", lst["status"] == "ok" and lst["total"] >= 1,
+          f"total={lst.get('total')}")
+
     names = list(TOOLS)
     if not a.search:
         names = [n for n in names if n != "search_disclosure"]

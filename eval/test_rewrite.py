@@ -217,6 +217,82 @@ check("rewrite_question 이 추정 doc_groups 를 걷어낸다",
 
 print()
 print("=" * 74)
+print("5-C — ki(기수) 가드: fiscal_years 의 1900 미만 값은 ki 로 옮긴다 (step39)")
+print("=" * 74)
+KI_JSON = json.dumps(dict(json.loads(GOOD_JSON), fiscal_years=[50], ki=[]),
+                     ensure_ascii=False)
+fake, st = make_chat({"ok": True, "text": KI_JSON, "tool_calls": [], "usage": {}})
+clova.chat = fake
+try:
+    rw = R.rewrite_question("OCI홀딩스 제50기 매출은?")
+finally:
+    clova.chat = real_chat
+check("fiscal_years=[50] → ki=[50] 으로 이동",
+      rw["ok"] and rw["analysis"]["ki"] == [50] and rw["analysis"]["fiscal_years"] == [],
+      str(rw["analysis"] and (rw["analysis"]["ki"], rw["analysis"]["fiscal_years"])))
+check("분석 블록에 ki 안내가 들어간다",
+      "ki=50" in R.analysis_block(rw["analysis"]), R.analysis_block(rw["analysis"])[:120])
+MIX_JSON = json.dumps(dict(json.loads(GOOD_JSON), fiscal_years=[2024, 76], ki=[]),
+                      ensure_ascii=False)
+fake, st = make_chat({"ok": True, "text": MIX_JSON, "tool_calls": [], "usage": {}})
+clova.chat = fake
+try:
+    rw = R.rewrite_question("질문")
+finally:
+    clova.chat = real_chat
+check("연도와 기수가 섞이면 나눈다",
+      rw["analysis"]["fiscal_years"] == [2024] and rw["analysis"]["ki"] == [76],
+      str((rw["analysis"]["fiscal_years"], rw["analysis"]["ki"])))
+
+print()
+print("=" * 74)
+print("5-D — 파싱 실패 시 재시도 1회 (step39 · e2e_v5 3/40 실측)")
+print("=" * 74)
+real_sleep = time.sleep
+time.sleep = lambda *_: None                   # 재시도 2초 대기를 건너뛴다
+
+
+def flaky_reply():
+    """1차는 산문(파싱 불가), 2차는 정상 JSON."""
+    flaky_reply.n = getattr(flaky_reply, "n", 0) + 1
+    if flaky_reply.n == 1:
+        return {"ok": True, "text": "질문을 이해했습니다. 분석해 드리겠습니다.",
+                "tool_calls": [], "usage": {}}
+    return {"ok": True, "text": GOOD_JSON, "tool_calls": [], "usage": {}}
+
+
+fake, st = make_chat(flaky_reply)
+clova.chat = fake
+try:
+    rw = R.rewrite_question(ORIG_Q)
+finally:
+    clova.chat = real_chat
+    time.sleep = real_sleep
+check("1차 실패 → 재시도로 성공", rw["ok"] is True, repr(rw["note"]))
+check("재시도 호출이 res_retry 로 남는다(토큰 회계)", rw["res_retry"] is not None)
+check("실패 원본이 logs/rewrite_fail.jsonl 에 남는다",
+      R.FAIL_LOG.is_file() and "분석해 드리겠습니다" in
+      R.FAIL_LOG.read_text(encoding="utf-8"))
+
+time.sleep = lambda *_: None
+
+
+def always_prose():
+    return {"ok": True, "text": "산문만 낸다.", "tool_calls": [], "usage": {}}
+
+
+fake, st = make_chat(always_prose)
+clova.chat = fake
+try:
+    rw = R.rewrite_question(ORIG_Q)
+finally:
+    clova.chat = real_chat
+    time.sleep = real_sleep
+check("재시도까지 실패하면 생략(ok=False)", rw["ok"] is False
+      and "재시도" in rw["note"], repr(rw["note"]))
+
+print()
+print("=" * 74)
 print("6 — DART_REWRITE=0 이면 재작성을 부르지 않는다")
 print("=" * 74)
 os.environ["DART_REWRITE"] = "0"
