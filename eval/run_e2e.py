@@ -522,6 +522,8 @@ def run(items: list, out_path: Path, budget, sleep: float, model, deadline: floa
             "waste": res.get("waste") or {},
             "stopped_by_budget": bool(res.get("stopped_by_budget")),
             "unsourced_claim": bool(res.get("unsourced_claim")),
+            # 질문 재작성 결과(step36). 채점 대조표가 재작성문·회사·연도를 보여준다
+            "rewrite": res.get("rewrite") or {},
             "note": res.get("note") or "",
             "elapsed": round(time.time() - t0, 2),
             # 문항별 비용. usage.est_won 과 같은 값이지만 표를 만들 때 바로 쓴다
