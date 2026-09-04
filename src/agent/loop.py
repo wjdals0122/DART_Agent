@@ -164,8 +164,11 @@ AUDIT_ALL_BAD = (
     "필터를 완화해 한 번 더 조회하라. 특히 rcept_dt·fiscal_year·doc_group 중 "
     "불필요한 것을 빼라. 그래도 없으면 그때 확인되지 않음으로 답하라."
 )
-# 검문 4 의 거절 표현. 지시가 이 셋을 지목했다.
-_ALL_BAD_REFUSE = ("확인되지 않", "찾을 수 없", "확인할 수 없")
+# 검문 4 의 거절 표현. 처음 셋은 최초 지시가 지목한 것.
+# 뒤의 넷은 step33(2026-09-04) 추가 — 두산퓨얼셀 실측에서 전부 빗나간 도구 뒤
+# "정보가 없어 답변할 수 없습니다" 로 끝났는데 어느 표현에도 안 걸렸다.
+_ALL_BAD_REFUSE = ("확인되지 않", "찾을 수 없", "확인할 수 없",
+                   "답변할 수 없", "답변드릴 수 없", "제공할 수 없", "알 수 없")
 
 # 검문 5 — 도구를 부르겠다고 **말만 하고** 답변을 끝낼 때.
 #
@@ -180,6 +183,12 @@ AUDIT_ANNOUNCED = (
 )
 _TOOL_NAMES = ("search_disclosure", "list_disclosures", "calculate", "resolve_company")
 _ANNOUNCE = ("하겠습니다", "해야 합니다", "필요합니다", "검색하여", "조회하여")
+# 검문 5 확장(step33 · 2026-09-04) — 도구 호출을 **텍스트로** 출력하고 끝낸 실측:
+#   [{"name": "search_disclosure", "arguments": {"query": ...}}]
+# 예고 표현이 없어 위 조건이 못 잡았다. 도구 이름 뒤 이 창 안에 '(' 나 '{' 가
+# 오면 호출 시늉으로 본다(JSON 은 이름과 '{' 사이에 `", "arguments": ` 가 끼어
+# 바로 뒤 문자만 봐서는 못 잡는다). 실제로 부른 도구 언급은 called 검사가 걸러 준다.
+_CALL_WINDOW = 20
 
 # 검문 6 — 여러 값의 크기를 비교하면서 calculate 를 안 썼을 때.
 #
@@ -304,15 +313,30 @@ def announced_but_not_called(text: str, tool_calls: list) -> bool:
     추가 확인이 필요합니다." 처럼 멀쩡한 답변에서 두 조각이 다른 문장에 흩어져
     있을 수 있다. (3) 이 가장 강한 방어다. 실제로 부른 도구를 언급하는 것은
     정상 답변이므로 절대 걸리지 않는다.
+
+    【확장(step33) — 예고 표현 없이 호출 시늉만 있는 경우】
+    안 부른 도구 이름 뒤 `_CALL_WINDOW`자 안에 '(' 나 '{' 가 오면 발동한다.
+    도구 호출 JSON 을 답변 본문에 텍스트로 출력하고 끝낸 실측을 잡는다.
     """
     try:
         called = {(c or {}).get("name") for c in (tool_calls or [])}
-        for sent in _SENT.findall(text or ""):
+        body = text or ""
+        for sent in _SENT.findall(body):
             if not any(w in sent for w in _ANNOUNCE):
                 continue
             for name in _TOOL_NAMES:
                 if name in sent and name not in called:
                     return True
+        # 호출 시늉 — 안 부른 도구 이름 + 근처의 '(' 또는 '{'
+        for name in _TOOL_NAMES:
+            if name in called:
+                continue
+            pos = body.find(name)
+            while pos != -1:
+                tail = body[pos + len(name): pos + len(name) + _CALL_WINDOW]
+                if "(" in tail or "{" in tail:
+                    return True
+                pos = body.find(name, pos + 1)
         return False
     except Exception:                          # noqa: BLE001
         traceback.print_exc(file=sys.stderr)
@@ -617,6 +641,9 @@ BOILERPLATE = (
     "참고하시기 바랍니다", "문의하시기 바랍니다", "문의하여 주시기",
     "공개되지 않을 가능성", "내부 회의록에서 확인", "추가적인 정보가 필요하시면",
     "도움이 될 것", "문의해 주시기",
+    # step33(2026-09-04) 추가 — "공식 홈페이지나 언론 보도 등을 참고하시는 것을
+    # 추천드립니다" 가 실측으로 남았다. 지시의 "참고하시기 바랍니다" 는 위에 이미 있다.
+    "참고하시는 것을 추천", "문의하시는 것을 권장", "확인해 보시기 바랍니다",
 )
 
 

@@ -116,6 +116,17 @@ check("검문 2·4 가 동시에 참이 되지 않는다",
       not (refused_without_search("확인되지 않습니다.", bad("search_disclosure"))
            and all_tools_failed("확인되지 않습니다.", [])))
 
+# --- step33 확장: 거절 표현 4종 추가 ---
+check("'답변할 수 없' 도 거절로 본다 — 두산퓨얼셀 실측",
+      all_tools_failed("해당 계약에 대한 정보가 없어 답변할 수 없습니다.",
+                       bad("search_disclosure")))
+check("'제공할 수 없' 도 거절로 본다",
+      all_tools_failed("해당 정보를 제공할 수 없습니다.", bad("list_disclosures", "error")))
+check("ok 가 있으면 새 표현이 있어도 안 잡는다",
+      not all_tools_failed("답변할 수 없습니다.", tc("search_disclosure")))
+check("거절이 아니면 여전히 안 잡는다",
+      not all_tools_failed("영업이익은 9,716억원이다.", bad("search_disclosure")))
+
 print()
 print("=" * 74)
 print("2-C — 검문 5 판정: 부르겠다고 해 놓고 안 불렀나")
@@ -148,6 +159,22 @@ check("예고 표현이 다른 문장에 있으면 안 걸린다",
           tc("list_disclosures")))
 check("도구 0회 + 예고만 있어도 도구 이름이 없으면 안 걸린다",
       not announced_but_not_called("조회하여 확인하겠습니다.", []))
+
+# --- step33 확장: 호출 시늉(예고 표현 없이 JSON/괄호) ---
+JSON_CALL = ('[{"name": "search_disclosure", "arguments": '
+             '{"query": "연료전지 시스템 공급계약"}}]')
+check("호출 JSON 텍스트를 잡는다 — 두산퓨얼셀 실측",
+      announced_but_not_called(JSON_CALL, tc("list_disclosures")))
+check("괄호 호출 시늉도 잡는다",
+      announced_but_not_called("search_disclosure(query='계약금액') 결과를 보면 된다.",
+                               tc("list_disclosures")))
+check("실제로 부른 도구의 괄호 언급은 안 걸린다",
+      not announced_but_not_called(
+          "search_disclosure(query='매출액') 로 조회한 결과 300,870,903백만원입니다.",
+          tc("search_disclosure")))
+check("괄호·중괄호가 근처에 없으면 안 걸린다",
+      not announced_but_not_called("search_disclosure 결과 문서는 사업보고서였다.",
+                                   tc("list_disclosures")))
 
 print()
 print("=" * 74)

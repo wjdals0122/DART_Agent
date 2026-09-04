@@ -115,6 +115,21 @@ for name, sent in STAY:
     got = strip_boilerplate(sent)
     check(f"남긴다 — {name}", got.strip() == sent, repr(got))
 
+# step33 추가 3종 — "공식 홈페이지나 언론 보도 등을 참고하시는 것을
+# 추천드립니다" 가 실측으로 남았다
+GO33 = [("참고하시는 것을 추천",
+         "공식 홈페이지나 언론 보도 등을 참고하시는 것을 추천드립니다."),
+        ("문의하시는 것을 권장", "자세한 내용은 회사에 문의하시는 것을 권장합니다."),
+        ("확인해 보시기 바랍니다", "공시 원문을 확인해 보시기 바랍니다.")]
+for name, sent in GO33:
+    got = strip_boilerplate("2024년 매출은 300조다. " + sent)
+    check(f"지운다(step33) — {name}", sent not in got and "300조" in got, repr(got))
+STAY33 = [("확인 서술문", "감사인은 연결재무제표를 직접 확인해 보았다."),
+          ("참고 서술문", "이 값은 사업보고서 주석을 참고해 산출한 수치다.")]
+for name, sent in STAY33:
+    got = strip_boilerplate(sent)
+    check(f"남긴다(step33) — {name}", got.strip() == sent, repr(got))
+
 print()
 print("=" * 74)
 print("4 — 문장만 지우고 문단을 지우지 않는다")
