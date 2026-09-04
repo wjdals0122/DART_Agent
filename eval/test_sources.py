@@ -135,6 +135,17 @@ for name, sent in STAY33:
     got = strip_boilerplate(sent)
     check(f"남긴다(step33) — {name}", got.strip() == sent, repr(got))
 
+# step40 (3-F) — 역질문 블록은 상투구가 아니다. 지우면 채점 항목을 잃는다.
+ASKBACK = ("해당 항목은 공시에서 확인되지 않습니다.\n\n"
+           "확인 가능한 관련 정보:\n"
+           "(a) 2025년 확정 실적(매출·영업이익)으로 정리해 드릴까요?\n"
+           "(b) 해당 계약의 공시 이력(체결일·상대방·유보 사유)으로 정리해 드릴까요?\n"
+           "필요한 항목을 알려주시면 그 범위로 답변드리겠습니다.")
+got = strip_boilerplate(ASKBACK)
+check("역질문 '드릴까요?' 를 안 지운다", "정리해 드릴까요?" in got, repr(got[-80:]))
+check("역질문 '알려주시면' 을 안 지운다", "알려주시면 그 범위로" in got, repr(got[-60:]))
+check("역질문 블록 전체가 그대로", got.strip() == ASKBACK, "")
+
 print()
 print("=" * 74)
 print("4 — 문장만 지우고 문단을 지우지 않는다")

@@ -79,6 +79,11 @@ FALLBACK = "공시에서 확인되지 않음"
 REMINDER = "\n".join([
     "위 자료만으로 답하라.",
     "사칙연산이 필요하면 암산하지 말고 calculate 도구를 부른다.",
+    # 역질문(3-F) — system.txt 의 [확인되지 않음] 절에도 있지만, 도구 결과가
+    # 쌓이면 멀어져 안 지켜졌다(실측 0/3). 고칠 지점 옆에서 한 번 더 말한다.
+    "물은 항목이 공시에 없으면, 답변 끝에 '확인 가능한 관련 정보:' 로 검색 결과에 "
+    "실제로 있는 대안을 (a)(b) 2~3개 제시하고 '필요한 항목을 알려주시면 그 범위로 "
+    "답변드리겠습니다' 로 되묻는다. 없는 항목을 다른 수치로 만들어 채우지 마라.",
 ])
 
 # 도구를 한 번도 안 부르고 답하려 할 때 **먼저** 던지는 지시.
@@ -152,8 +157,11 @@ AUDIT_TAIL = (
 
 # 프롬프트 예시의 자리표시자. 답변에 나오면 예시를 베낀 것이다 — 항상 걷어낸다.
 PLACEHOLDERS = ("ㅇㅇ전자", "△△전자", "○○기업", "△△지주", "XXXXXX")
-# 검문 후 답변이 이 말로 시작하거나 첫 문단에 품으면 지시를 되읊은 것이다
-_ECHO_WORDS = ("앞서", "이전 답변", "수정하여", "다시 작성")
+# 검문 후 답변이 이 말로 시작하거나 첫 문단에 품으면 지시를 되읊은 것이다.
+# 뒤의 셋은 step40 실측 추가 — "죄송합니다. 제가 제공한 답변에 오류가 있었습니다.
+# 다음은 수정된 답변입니다" 로 시작하며 같은 값을 반복했다.
+_ECHO_WORDS = ("앞서", "이전 답변", "수정하여", "다시 작성",
+               "죄송합니다", "수정된 답변", "오류가 있었")
 _TOOL_WORDS = ("search_disclosure", "calculate", "list_disclosures")
 
 
@@ -249,6 +257,94 @@ _ANNOUNCE = ("하겠습니다", "해야 합니다", "필요합니다", "검색�
 # 오면 호출 시늉으로 본다(JSON 은 이름과 '{' 사이에 `", "arguments": ` 가 끼어
 # 바로 뒤 문자만 봐서는 못 잡는다). 실제로 부른 도구 언급은 called 검사가 걸러 준다.
 _CALL_WINDOW = 20
+
+# 검문 8 — 답변의 수치가 검색 결과·질문·계산 결과 어디에도 없을 때.
+#
+# 【왜 — e2e_v5 2번 실측】 Pfizer 선급금으로 USD 10,000,000 / 2,000,000 을
+# 답했는데 어느 청크에도 없다. 다른 계약(Salubris 4,000,000·Blue Earth
+# 1,500,000)의 값도 아닌 **합성값**이다. 정답은 "계약상 비밀유지로 기재 생략".
+#
+# calculate 가 만든 값은 통과한다 — 합성 자체를 여기서 막지는 못하고([26] 유형)
+# 그건 [계산] 절 프롬프트(3-A)에 맡긴다.
+AUDIT_UNSOURCED_NUM = (
+    "답변의 수치 {nums} 이(가) 검색 결과·질문·계산 결과 어디에도 없다. "
+    "출처를 확인하고, 없으면 그 수치를 빼고 다시 작성하라."
+)
+# 백분율(숫자+%·퍼센트)은 검사 대상에서 뺀다 — 계산·인용 어느 쪽이든 검문 1이 담당
+_PCT_TOKEN = re.compile(r"\d[\d,]*(?:\.\d+)?\s*(?:%|퍼센트)")
+# 'X조 Y억' / 'X억' 한글 단위 표기 — 자리수 표기와 같은 값으로 봐야 한다
+_KOR_NUM = re.compile(r"(?:(\d[\d,]*)\s*조\s*)?(\d[\d,]*)\s*억|(\d[\d,]*)\s*조")
+_NUM6 = re.compile(r"\d{6,}")
+_NUM4 = re.compile(r"\d{4,}")
+
+
+def _kor_value(m) -> int:
+    """_KOR_NUM 매치 하나를 원 단위 정수로."""
+    jo = int((m.group(1) or m.group(3) or "0").replace(",", ""))
+    eok = int((m.group(2) or "0").replace(",", ""))
+    return jo * 10**12 + eok * 10**8
+
+
+def unsourced_numbers(text, documents, question, tool_calls, sources=None) -> list:
+    """답변에만 있는 수치 목록(원문 표기). 없으면 []. 예외를 던지지 않는다.
+
+    【무엇을 근거로 인정하는가】 검색 청크 원문 + 문서 메타(접수번호·접수일·
+    보고서명) + 질문 원문(가상 경쟁사 값) + calculate 인자·결과.
+    【표기 변형】 66,192,960 / 66192960 / 6조 6,192억 을 같은 값으로 본다 —
+    쉼표를 지운 자리수 문자열로 맞추고, 한글 단위는 원 단위로 펼친 뒤
+    앞자리(유효숫자) 접두 일치를 허용한다(반올림·단위 환산 표기 대비).
+    """
+    try:
+        body = _PCT_TOKEN.sub(" ", text or "")
+
+        hay_parts = [str(question or "")]
+        for d in (documents or []):
+            d = d or {}
+            hay_parts += [str(d.get("text") or ""), str(d.get("rcept_no") or ""),
+                          str(d.get("rcept_dt") or ""), str(d.get("report_nm") or "")]
+        for s in (sources or []):
+            hay_parts.append(str(s or ""))
+        for c in (tool_calls or []):
+            c = c or {}
+            if c.get("name") == "calculate":
+                hay_parts.append(json.dumps(c.get("arguments") or {}, default=str))
+                hay_parts.append(str(c.get("summary") or ""))
+        hay = "\n".join(hay_parts).replace(",", "")
+        hay_nums = set(_NUM4.findall(hay))
+
+        def matched(digits: str) -> bool:
+            if digits in hay:
+                return True
+            sig = digits.rstrip("0")
+            if sig and len(sig) >= 3 and any(h.startswith(sig) for h in hay_nums):
+                return True                     # 한글 단위·반올림 표기
+            return any(len(h.rstrip("0")) >= 5 and digits.startswith(h.rstrip("0"))
+                       for h in hay_nums)       # 단위 환산으로 0 이 붙은 표기
+
+        missing = []
+        flat = body.replace(",", "")
+        for m in _NUM6.finditer(flat):
+            d = m.group(0)
+            if len(d) == 14:
+                continue                        # 접수번호
+            if len(d) == 8 and d[:2] in ("19", "20"):
+                continue                        # YYYYMMDD 날짜
+            if not matched(d) and d not in missing:
+                missing.append(d)
+        for m in _KOR_NUM.finditer(body):
+            token = m.group(0)
+            if token.replace(",", "") in hay:   # 같은 한글 표기가 근거에 그대로 있다
+                continue
+            digits = str(_kor_value(m))
+            if len(digits) < 6:
+                continue
+            if not matched(digits) and token not in missing:
+                missing.append(token)
+        return missing[:5]
+    except Exception:                          # noqa: BLE001 — 검문이 답을 막으면 안 된다
+        traceback.print_exc(file=sys.stderr)
+        return []
+
 
 # 검문 6 — 여러 값의 크기를 비교하면서 calculate 를 안 썼을 때.
 #
@@ -860,7 +956,7 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
                      "no_tool_nudge": False, "list_only_nudge": False,
                      "answered_without_tools": False,
                      # 최종 답변 검문이 걸렸으면 그 종류 —
-                     # calc·compare·no_search·all_bad·announced 중 하나
+                     # calc·compare·unsourced_num·no_search·all_bad·announced 중 하나
                      "audit": "",
                      # 검문 후 답변이 되읊기·형식 붕괴라 검문 전 것으로 되돌렸나
                      "audit_reverted": False,
@@ -1160,6 +1256,10 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
                     kind, note = "calc", AUDIT_CALC
                 elif compares_without_calc(text, out["tool_calls"]):
                     kind, note = "compare", AUDIT_COMPARE
+                elif (miss := unsourced_numbers(text, out["documents"], question,
+                                                out["tool_calls"], out["sources"])):
+                    kind = "unsourced_num"
+                    note = AUDIT_UNSOURCED_NUM.format(nums=", ".join(miss))
                 elif refused_without_search(text, out["tool_calls"]):
                     kind, note = "no_search", AUDIT_NO_SEARCH
                 elif all_tools_failed(text, out["tool_calls"]):

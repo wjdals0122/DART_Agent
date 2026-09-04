@@ -89,9 +89,13 @@ print("3 — build_context 안에서의 자리")
 print("=" * 74)
 
 ctx = C.build_context([res("반기보고서 (2024.06)")])
-head = ctx.splitlines()[0]
-check("경고가 첫 줄이다", head.startswith("※ 자동 주석"), head[:70])
-check("<document> 태그 바깥이다", ctx.index("※") < ctx.index("<document"))
+lines = ctx.splitlines()
+# step40(1-E)부터 맨 윗줄은 메타 헤더([문서1] …)다. 경고는 그 아래·태그 바깥.
+check("메타 헤더가 첫 줄이다", lines[0].startswith("[문서1]"), lines[0][:70])
+check("경고가 <document> 앞에 있다",
+      any(l.startswith("※ 자동 주석") and "보고기간" in l for l in lines)
+      and ctx.index("※ 자동 주석") < ctx.index("<document"),
+      str([l[:40] for l in lines[:5]]))
 check("본문은 그대로", "12,394,044" in ctx)
 
 ctx = C.build_context([res("사업보고서 (2024.12)")])

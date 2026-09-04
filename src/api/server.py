@@ -113,11 +113,19 @@ def start_warmup() -> None:
 
 
 def _doc_block(d: dict) -> str:
-    """문서 하나의 본문 블록. [문서N] 번호는 조립 때 붙인다(선별 뒤 번호가 바뀐다)."""
-    head = f"{d.get('corp_name', '')} {d.get('report_nm', '')}"
-    if d.get("rcept_no"):
-        head += f", 접수번호 {d['rcept_no']}"
-    line = [head]
+    """문서 하나의 본문 블록. [문서N] 번호는 조립 때 붙인다(선별 뒤 번호가 바뀐다).
+
+    헤더는 LLM 컨텍스트와 같은 형식(context.doc_header_lines, 1-E) —
+    회계연도·제N기·기간·접수일을 명시해 평가자도 같은 정보를 본다.
+    """
+    try:
+        from src.agent.context import doc_header_lines
+        line = doc_header_lines(d.get("corp_name"), d.get("report_nm"),
+                                d.get("rcept_no"), d.get("rcept_dt"))
+    except Exception:                          # noqa: BLE001 — 헤더 실패는 최소 형식으로
+        traceback.print_exc()
+        line = [f"{d.get('corp_name', '')} {d.get('report_nm', '')}"
+                + (f", 접수번호 {d['rcept_no']}" if d.get("rcept_no") else "")]
     if d.get("section"):
         line.append(f"섹션: {d['section']}")
     if d.get("note"):

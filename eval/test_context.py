@@ -20,7 +20,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from src.agent.context import (DOC_MAP_PATH, annotate, build_context,  # noqa: E402
-                               correction_note, ensure_doc_map, _doc_map)
+                               correction_note, doc_header_lines, ensure_doc_map,
+                               _doc_map)
 
 FAIL = []
 
@@ -66,14 +67,19 @@ check("기수 환산 + 단위 + 연결기준", note ==
       "※ 자동 주석(공시 원문 아님): 제17기=2023년, 제16기=2022년 · 단위 천원 · 연결기준",
       repr(note))
 
-# 2. 주석은 <document> 바깥 윗줄
+# 2. 메타 헤더(1-E)가 맨 위, 주석은 <document> 바깥 윗줄
 #    r 은 분기보고서라 2026-09-03 부터 보고기간 경고(period_note)가 함께 붙는다.
-#    그래서 "둘째 줄이 <document>" 로 못 박지 않고, <document> 앞이 전부 주석인지 본다.
 ctx = build_context([r])
 lines = ctx.splitlines()
 doc_i = next((i for i, l in enumerate(lines) if l.startswith('<document id="1"')), -1)
+check("메타 헤더가 맨 윗줄",
+      lines[0].startswith("[문서1] CJ제일제당") and "회계연도 2023" in lines[0]
+      and "접수번호 20230515002270" in lines[0], repr(lines[0]))
+check("분기보고서 헤더에 누적 기간", "2023년 1~3월 누적" in lines[0], repr(lines[0]))
+check("헤더에 제N기(표에서)", "제17기" in lines[0], repr(lines[0]))
+check("당기/전기 명시 줄", '"당기"는 2023년, "전기"는 2022년' in lines[1], repr(lines[1]))
 check("주석이 <document> 바깥 윗줄",
-      lines[0].startswith("※ 자동 주석") and doc_i > 0
+      doc_i > 1 and any(l.startswith("※ 자동 주석") for l in lines[:doc_i])
       and all(not l.lstrip().startswith("<") for l in lines[:doc_i]),
       repr(lines[:doc_i + 1]))
 check("분기보고서에 보고기간 경고", "연간 확정치를 묻는 질문이면" in "\n".join(lines[:doc_i]),
@@ -90,7 +96,9 @@ r2 = result("| 과목 | 당기 | 전기 |\n| 이자수익 | 100 | 90 |",
             corp="KB금융", report="사업보고서 (2024.12)", dt="20250311", no="20250311001275",
             fy=2024)
 check("기수 없으면 주석 None", annotate(r2) is None, repr(annotate(r2)))
-check("기수 없어도 블록은 정상", build_context([r2]).startswith("<document id=\"1\""))
+check("기수 없어도 블록은 정상(헤더 뒤 <document>)",
+      build_context([r2]).splitlines()[0].startswith("[문서1] KB금융")
+      and '<document id="1"' in build_context([r2]))
 
 # 5. 문서가 표에 없으면(이벤트 공시) 주석 생략 — 접수 연도로 때우지 않는다
 r3 = result("제 5 기 매출액", "주요사항보고서 > 본문", corp="삼성전자",
@@ -131,9 +139,34 @@ check("정정 아니면 경고 None", correction_note(r) is None)
 
 # 7b. 경고가 <document> 바깥 윗줄에 들어간다 (검색 메타에만 있으면 LLM 이 못 본다)
 ctx5 = build_context([r5])
+_l5 = ctx5.splitlines()
+_d5 = next((i for i, l in enumerate(_l5) if l.startswith("<document")), -1)
 check("정정 경고가 <document> 바깥",
-      ctx5.splitlines()[0].startswith("※ 자동 주석(공시 원문 아님): 정정 전 자료")
-      and "<document" in ctx5, repr(ctx5.splitlines()[:3]))
+      any(l.startswith("※ 자동 주석(공시 원문 아님): 정정 전 자료") for l in _l5[:_d5])
+      and "<document" in ctx5, repr(_l5[:4]))
+
+# 7c. doc_header_lines 단위 (1-E)
+h = doc_header_lines("SK하이닉스", "사업보고서 (2024.12)", "20250319000665",
+                     "20250319", idx=1)
+check("연간 헤더 형식", h[0].startswith("[문서1] SK하이닉스 사업보고서")
+      and "회계연도 2024" in h[0] and "접수일 2025-03-19" in h[0]
+      and "접수번호 20250319000665" in h[0], repr(h[0]))
+check("연간 헤더에 누적 표기는 없다", "누적" not in h[0], repr(h[0]))
+check("당기/전기 줄", h[1] == '※ 이 문서의 "당기"는 2024년, "전기"는 2023년이다', repr(h[1]))
+h2 = doc_header_lines("삼성전자", "주요사항보고서(자기주식취득결정)",
+                      "20250218000019", "20250218", idx=2)
+check("이벤트 공시는 접수일만", h2 == ["[문서2] 삼성전자 주요사항보고서(자기주식취득결정) "
+                                       "· 접수일 2025-02-18 · 접수번호 20250218000019"],
+      repr(h2))
+h3 = doc_header_lines("어디회사", "사업보고서 (2019.12)", "99999999999999", "20200330")
+check("표에 없으면 제N기 칸 생략", "제" not in h3[0].split("접수일")[0].replace("[문서", "")
+      and "회계연도 2019" in h3[0], repr(h3[0]))
+check("idx 없으면 접두 없음", not h3[0].startswith("[문서"), repr(h3[0][:20]))
+try:
+    doc_header_lines(None, None, None, None)
+    check("지저분한 입력 예외 없음", True)
+except Exception as e:                         # noqa: BLE001
+    check("지저분한 입력 예외 없음", False, str(e))
 
 # 8. 별도기준 추론
 r6 = result("제 17 기 자산총계", "사업보고서 (2023.12) > 재무상태표", fy=2023)

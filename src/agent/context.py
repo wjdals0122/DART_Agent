@@ -635,6 +635,58 @@ def progress_note(res: dict):
             "못 박아야 하면 해당 거래소공시(단일판매ㆍ공급계약 체결/정정)와 대조하라.")
 
 
+# ---------------------------------------------------------------- 문서 메타 헤더
+#
+# 【왜 — 2026-09-04 step40 (1-E)】
+# 모델이 문서의 연도·기수를 본문의 "당기·전기" 에서 짐작한다. 회귀 4번이
+# 분기보고서의 전기 열을 연간값으로 읽은 것, e2e 15·33 이 기수를 틀린 것이
+# 이 때문이다. 연도·기수·기간을 헤더에 **명시**하고 프롬프트가 "헤더를 쓰라"
+# 고 가리킨다. 서버 retrieved_context 도 같은 헤더를 쓴다(형식 통일).
+
+
+def doc_header_lines(corp_name, report_nm, rcept_no, rcept_dt,
+                     doc_id=None, idx=None) -> list:
+    """문서 메타 헤더 1~2줄. 예외 없음 — 실패하면 최소 형식으로 돌아간다.
+
+      [문서1] SK하이닉스 사업보고서 · 회계연도 2024 · 제77기 · 접수일 2025-03-19 · 접수번호 …
+      ※ 이 문서의 "당기"는 2024년, "전기"는 2023년이다
+
+    - 제N기는 doc_fiscal_map 에서. 표에 없으면 그 칸을 뺀다
+    - 분기·반기(월≠12)는 "2024년 1~9월 누적" 기간을 명시한다
+    - 이벤트 공시(회계연도 없음)는 접수일·접수번호만 남긴다
+    - idx 를 주면 "[문서N] " 접두가 붙는다(서버는 절단 뒤 번호를 다시 매기므로 뺀다)
+    """
+    corp = str(corp_name or "")
+    nm = str(report_nm or "")
+    rc = str(rcept_no or "")
+    prefix = f"[문서{idx}] " if idx is not None else ""
+    try:
+        dt = _dash_date(rcept_dt)
+        m = _FY.search(nm)
+        if not m:                              # 이벤트 공시 — 접수일만
+            return [f"{prefix}{corp} {nm} · 접수일 {dt} · 접수번호 {rc}".strip()]
+        fy, month = int(m.group(1)), int(m.group(2))
+        base = _FY.sub("", nm).strip()
+        parts = [f"회계연도 {fy}"]
+        if month != 12:
+            parts.append(f"{fy}년 1~{month}월 누적")
+        dm = _doc_map()
+        entry = dm.lookup(doc_id, rc) if dm else None
+        if entry:
+            try:
+                cur = int(entry.get("current_ki") or 0)
+                if cur > 0:
+                    parts.append(f"제{cur}기")
+            except (TypeError, ValueError):
+                pass
+        parts += [f"접수일 {dt}", f"접수번호 {rc}"]
+        return [f"{prefix}{corp} {base} · " + " · ".join(parts),
+                f'※ 이 문서의 "당기"는 {fy}년, "전기"는 {fy - 1}년이다']
+    except Exception:           # noqa: BLE001 — 헤더가 조립을 막으면 안 된다
+        traceback.print_exc(file=sys.stderr)
+        return [f"{prefix}{corp} {nm} · 접수번호 {rc}".strip()]
+
+
 # ---------------------------------------------------------------- 조립
 
 
@@ -660,9 +712,13 @@ def build_context(results) -> str:
         head = (f'<document id="{i}" '
                 f'source="{_attr(_source_label(src))}"\n'
                 f'          section="{_attr(_section(src))}">')
+        # 메타 헤더(1-E)가 맨 위 — 연도·기수·기간을 본문에서 짐작하지 않게 명시한다
+        meta = doc_header_lines(src.get("corp_name"), src.get("report_nm"),
+                                src.get("rcept_no"), src.get("rcept_dt"),
+                                doc_id=res.get("doc_id") or src.get("doc_id"), idx=i)
         notes = [n for n in (correction_note(res), period_note(res),
                              progress_note(res), annotate(res)) if n]
-        prefix = "".join(n + "\n" for n in notes)
+        prefix = "".join(n + "\n" for n in meta + notes)
         blocks.append(prefix + head + "\n" + body + "\n</document>")
     return "\n\n".join(blocks)
 

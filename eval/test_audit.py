@@ -214,6 +214,43 @@ check("비교 표현이 없으면 안 잡는다",
 
 print()
 print("=" * 74)
+print("2-G — 검문 8 판정(unsourced_numbers): 답변에만 있는 수치 (step40)")
+print("=" * 74)
+
+D2 = [{"chunk_id": "c1", "text": "Salubris 계약금 USD 4,000,000, Blue Earth 1,500,000. "
+                                 "Pfizer 건은 계약상 비밀유지로 기재 생략."}]
+check("합성값을 잡는다 — 실측 2번(USD 10,000,000)",
+      "10000000" in loop.unsourced_numbers(
+          "Pfizer 선급금은 USD 10,000,000 입니다.", D2, "Pfizer 선급금은?", []))
+check("문서에 있는 값은 통과",
+      loop.unsourced_numbers("Salubris 계약금은 USD 4,000,000 입니다.", D2, "질문", []) == [])
+DOC66 = [{"chunk_id": "c1", "text": "매출액 66,192,960 백만원"}]
+check("표기 변형: 쉼표 없는 66192960 통과",
+      loop.unsourced_numbers("매출액은 66192960백만원이다.", DOC66, "질문", []) == [])
+check("표기 변형: '6조 6,192억' 도 같은 값으로 통과",
+      loop.unsourced_numbers("매출액은 약 6조 6,192억원이다.", DOC66, "질문", []) == [])
+check("질문 원문의 가상 경쟁사 값은 통과",
+      loop.unsourced_numbers("경쟁사는 9,800,000백만원이다.", [],
+                             "가상 경쟁사가 9,800,000백만원이라는데?", []) == [])
+check("calculate 결과값은 통과",
+      loop.unsourced_numbers("차액은 347,727백만원이다.", DOC66, "질문",
+                             [{"name": "calculate",
+                               "arguments": {"expression": "10147727-9800000"},
+                               "summary": "value=347727"}]) == [])
+check("접수번호 14자리는 제외",
+      loop.unsourced_numbers("[접수번호 20250319000665]", [], "질문", []) == [])
+check("백분율은 제외",
+      loop.unsourced_numbers("비중은 146,663% 다.", [], "질문", []) == [])
+check("YYYYMMDD 날짜는 제외",
+      loop.unsourced_numbers("접수일 20250319 기준이다.", [], "질문", []) == [])
+check("근거 절 출처 문자열의 값도 통과",
+      loop.unsourced_numbers("자본은 578,460억이다.", [], "질문", [],
+                             sources=["[KB금융 …, 자본 578,460억 …]"]) == [])
+check("지저분한 입력 예외 없음",
+      loop.unsourced_numbers(None, None, None, None) == [])
+
+print()
+print("=" * 74)
 print("2-E — 검문 되읊기 방어(audit_degraded)·자리표시자 제거 (step39)")
 print("=" * 74)
 
@@ -226,6 +263,9 @@ check("도구 이름이 본문에 나오면 잡는다 — 실측 19번",
       loop.audit_degraded("계약 금액의 변경 비율을 calculate 도구로 구했습니다.", PREV))
 check("자리표시자 누출을 잡는다",
       loop.audit_degraded("ㅇㅇ전자의 매출은 300,870,903백만원입니다.", PREV))
+check("'죄송합니다…수정된 답변' 어두를 잡는다 — step40 실측",
+      loop.audit_degraded("죄송합니다. 제가 제공한 답변에 오류가 있었습니다. "
+                          "다음은 수정된 답변입니다.", PREV))
 check("근거가 사라지면 잡는다",
       loop.audit_degraded("계약금액은 644억원이다.", PREV))
 check("멀쩡히 고친 답변은 안 잡는다",
@@ -352,8 +392,10 @@ check("검문 1 도 한 번만 (호출 4회 이하)", st2["i"] <= 4, f"{st2['i']
 check("검문 기록이 남는다", r2["waste"]["audit"] in ("calc", "no_search"),
       repr(r2["waste"]["audit"]))
 
-# 정상 답변은 검문에 안 걸린다 — 추가 호출이 없어야 한다
-r3, st3 = run_with(["매출액은 300,870,903백만원이다. 근거는 위와 같다."])
+# 정상 답변(검색 근거 없는 수치도 없음)은 검문에 안 걸린다
+# ※ step40 부터 '검색 0건인데 큰 숫자' 는 검문 8(unsourced_num)에 걸리는 게 맞다 —
+#   그래서 수치 없는 문장으로 바꿨다. 수치 유형은 아래 4-E 가 따로 본다.
+r3, st3 = run_with(["매출 자료는 근거 절에 정리했다. 근거는 위와 같다."])
 check("정상 답변은 검문에 안 걸린다", r3["waste"]["audit"] == "",
       repr(r3["waste"]["audit"]))
 
@@ -573,6 +615,23 @@ check("그래도 답은 나온다", bool(r11["answer"].strip()), r11["answer"][:
 r12, _ = run_compare(["가장 높은 회사는 A(1,000백만원)로 B(500백만원)보다 100% 많다."])
 check("검문 1·6 이 함께 걸리지 않는다 (검문 1 이 먼저)",
       r12["waste"]["audit"] == "calc", repr(r12["waste"]["audit"]))
+
+print()
+print("=" * 74)
+print("4-E — 검문 8 이 루프에서 딱 한 턴만 (step40)")
+print("=" * 74)
+r13, st13 = run_compare(["Pfizer 선급금은 USD 10,000,000 입니다."])
+check("검문 8 이 걸렸다", r13["waste"]["audit"] == "unsourced_num",
+      repr(r13["waste"]["audit"]))
+last13 = st13["seen"][-1]
+check("검문 8 지시가 들어갔다", any("답변의 수치" in (c or "") for c in last13))
+check("한 턴만 더 돈다 (LLM 3회)", st13["i"] == 3, f"{st13['i']}회")
+check("그래도 답은 나온다", bool(r13["answer"].strip()), r13["answer"][:40])
+# 근거에 있는 수치만 쓰는 정상 답변은 안 걸린다 — 검색 결과가 빈 fixture 라
+# 질문의 연도(2024)만 쓰는 답으로 확인한다
+r14, _ = run_compare(["2024년 자료는 공시에서 확인되지 않습니다."])
+check("수치 없는 답변은 검문 8 미발동", r14["waste"]["audit"] != "unsourced_num",
+      repr(r14["waste"]["audit"]))
 
 print()
 print("=" * 74)
