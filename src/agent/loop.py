@@ -274,6 +274,10 @@ AUDIT_SUBQ = (
     "하위 질문 {n}개 중 {m}개만 조회했다. 아직 조회하지 않은 하위 질문을 "
     "각각 검색한 뒤 답하라."
 )
+# 【비활성 — step44-C】 e2e_v6 에서 19/40 과다 발동했고, 5건에서 "아직 조회하지
+# 않은 하위 질문…" 이 답변 본문으로 새어 나왔다([20]은 배당 항목을 통째로 잃음).
+# 얻은 것은 [6] 하나뿐이고 v6 에서는 그마저 못 냈다. 판정 함수와 메시지는 남긴다.
+SUBQ_AUDIT_ENABLED = False
 
 
 def subq_under_searched(rewrite_info, tool_calls):
@@ -1296,8 +1300,9 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
                                                 out["tool_calls"], out["sources"])):
                     kind = "unsourced_num"
                     note = AUDIT_UNSOURCED_NUM.format(nums=", ".join(miss))
-                elif (nm := subq_under_searched(out.get("rewrite"),
-                                                out["tool_calls"])):
+                elif SUBQ_AUDIT_ENABLED and \
+                        (nm := subq_under_searched(out.get("rewrite"),
+                                                   out["tool_calls"])):
                     kind = "subq"
                     note = AUDIT_SUBQ.format(n=nm[0], m=nm[1])
                 elif refused_without_search(text, out["tool_calls"]):

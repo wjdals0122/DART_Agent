@@ -689,10 +689,14 @@ finally:
     clova.chat = real_chat
     T.TOOLS = real_tools
     os.environ["DART_REWRITE"] = "0"
-check("검문 7 이 걸렸다", r15["waste"]["audit"] == "subq", repr(r15["waste"]["audit"]))
-last15 = state7f["seen"][-1]
-check("검문 7 지시가 들어갔다(개수 포함)",
-      any("하위 질문 3개 중 1개만" in (c or "") for c in last15))
+# 【step44-C】 검문 7 은 비활성 — 판정 함수는 살아 있지만 루프에서 안 발동한다
+check("검문 7 은 비활성(발동 안 함)", r15["waste"]["audit"] != "subq",
+      repr(r15["waste"]["audit"]))
+check("판정 함수 자체는 살아 있다(재활성 대비)",
+      loop.subq_under_searched({"ok": True, "analysis":
+                                {"sub_questions": ["a", "b", "c"]}},
+                               tc("search_disclosure")) == (3, 1))
+check("스위치가 꺼져 있다", loop.SUBQ_AUDIT_ENABLED is False)
 check("그래도 답은 나온다", bool(r15["answer"].strip()), r15["answer"][:40])
 
 print()
