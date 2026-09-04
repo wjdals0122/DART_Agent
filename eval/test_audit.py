@@ -30,7 +30,8 @@ from src.agent import usage as usage_mod               # noqa: E402
 usage_mod.set_enabled(False)                           # 비용 로그를 더럽히지 않는다
 from src.agent.loop import (all_tools_failed,  # noqa: E402
                             announced_but_not_called, answer,
-                            needs_calc, refused_without_search)
+                            compares_without_calc, needs_calc,
+                            refused_without_search)
 
 FAIL = []
 
@@ -150,6 +151,37 @@ check("도구 0회 + 예고만 있어도 도구 이름이 없으면 안 걸린�
 
 print()
 print("=" * 74)
+print("2-D — 검문 6 판정: 여러 값을 비교했는데 calculate 를 안 불렀나")
+print("=" * 74)
+
+# 실측 환각(2026-09-04) 재현 — 억원과 백만원을 눈으로 견줘 작은 쪽을 골랐다
+COMPARE = ("조회된 회사 중 2024년 영업이익이 가장 높은 회사는 삼성E&A(9,716억원)"
+           "입니다. 기아는 12,667,139백만원입니다.")
+check("실제 환각 답변을 잡는다 — 억원·백만원 눈대중 비교",
+      compares_without_calc(COMPARE, tc("search_disclosure")))
+check("'최대' + 숫자 2개도 잡는다",
+      compares_without_calc("영업이익 최대는 A(1,000백만원)다. B는 2,500억원이다.",
+                            tc("search_disclosure")))
+check("'1위' 도 잡는다",
+      compares_without_calc("1위는 A(35,000백만원), 2위는 B(21,000백만원)입니다.",
+                            tc("search_disclosure")))
+check("calculate 를 불렀으면 안 잡는다",
+      not compares_without_calc(COMPARE, tc("calculate")))
+check("숫자가 하나뿐이면 안 잡는다",
+      not compares_without_calc("가장 높은 회사는 기아(12,667,139백만원)입니다.",
+                                tc("search_disclosure")))
+check("연도는 숫자로 세지 않는다",
+      not compares_without_calc("2024년 가장 높은 회사는 기아(12,667,139백만원)입니다.",
+                                tc("search_disclosure")))
+check("'최대주주' 는 비교 표현이 아니다",
+      not compares_without_calc("최대주주는 30,000,000주, 특수관계인은 5,000,000주를 "
+                                "보유합니다.", tc("search_disclosure")))
+check("비교 표현이 없으면 안 잡는다",
+      not compares_without_calc("매출액은 300,870,903백만원, 영업이익은 9,716억원이다.",
+                                tc("search_disclosure")))
+
+print()
+print("=" * 74)
 print("3 — 지저분한 입력에도 예외를 안 던진다")
 print("=" * 74)
 
@@ -169,6 +201,15 @@ for args in ((None, None), ("", []), ("확인되지 않", None)):
     except Exception:                          # noqa: BLE001
         ok = False
     check(f"refused_without_search{args!r:.30s} 예외 없음", ok)
+for args in ((None, None), ("", []), ("가장 높다 1,234 5,678", [None]),
+             ("최대 100 200", [{"name": None}])):
+    try:
+        compares_without_calc(*args)
+        ok = True
+    except Exception as e:                     # noqa: BLE001
+        ok = False
+        print("   ", type(e).__name__, e)
+    check(f"compares_without_calc{args!r:.36s} 예외 없음", ok)
 
 print()
 print("=" * 74)
@@ -386,6 +427,52 @@ check("부른 도구를 언급하는 정상 답변은 안 걸린다", r10["waste
 # list 만 ok 이고 본문 검색이 없으면 원래 한 번 되돌린다(step6-H). 검문 5 와 무관하다.
 check("  추가 턴은 LIST_ONLY_NUDGE 의 몫", r10["waste"]["list_only_nudge"] is True,
       str({k: v for k, v in r10["waste"].items() if v}))
+
+print()
+print("=" * 74)
+print("4-D — 검문 6 가 루프에서 딱 한 턴만 더 준다 (전수 비교 환각 재현)")
+print("=" * 74)
+
+
+def run_compare(texts):
+    """search 가 ok 를 주고, 모델이 크기 비교 답변을 calculate 없이 낸다."""
+    state = {"i": 0, "seen": []}
+
+    def fake(messages, **kw):
+        state["seen"].append([m.get("content") for m in messages])
+        i = state["i"]
+        state["i"] += 1
+        if i == 0 and kw.get("extra"):
+            return {"ok": True, "text": "", "finish_reason": "tool_calls", "usage": {},
+                    "tool_calls": [{"id": "c1", "type": "function",
+                                    "function": {"name": "search_disclosure",
+                                                 "arguments": {"query": "영업이익"}}}]}
+        return {"ok": True, "text": texts[min(i - 1, len(texts) - 1)],
+                "tool_calls": [], "finish_reason": "stop", "usage": {}}
+
+    T.TOOLS = dict(real_tools)
+    T.TOOLS["search_disclosure"] = lambda **kw: {
+        "status": "ok", "results": [], "sources": ["[○○ 사업보고서]"], "note": ""}
+    clova.chat = fake
+    try:
+        return answer("2024년 영업이익이 가장 높은 회사는?", deadline=50.0), state
+    finally:
+        clova.chat = real_chat
+        T.TOOLS = real_tools
+
+
+r11, st11 = run_compare([COMPARE])
+check("검문 6 가 걸렸다", r11["waste"]["audit"] == "compare", repr(r11["waste"]["audit"]))
+last11 = st11["seen"][-1]
+check("검문 6 지시가 들어갔다", any(loop.AUDIT_COMPARE in (c or "") for c in last11))
+check("검문 6 지시는 한 번만", sum(1 for c in last11 if c == loop.AUDIT_COMPARE) == 1)
+check("한 턴만 더 돈다 (LLM 3회)", st11["i"] == 3, f"{st11['i']}회")
+check("그래도 답은 나온다", bool(r11["answer"].strip()), r11["answer"][:40])
+
+# 배타 — 검문 1(비율·배수)과 함께 걸릴 조건이면 먼저 오는 검문 1 만 잡는다
+r12, _ = run_compare(["가장 높은 회사는 A(1,000백만원)로 B(500백만원)보다 100% 많다."])
+check("검문 1·6 이 함께 걸리지 않는다 (검문 1 이 먼저)",
+      r12["waste"]["audit"] == "calc", repr(r12["waste"]["audit"]))
 
 print()
 print("=" * 74)

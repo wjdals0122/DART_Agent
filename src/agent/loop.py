@@ -177,6 +177,22 @@ AUDIT_ANNOUNCED = (
 _TOOL_NAMES = ("search_disclosure", "list_disclosures", "calculate", "resolve_company")
 _ANNOUNCE = ("하겠습니다", "해야 합니다", "필요합니다", "검색하여", "조회하여")
 
+# 검문 6 — 여러 값의 크기를 비교하면서 calculate 를 안 썼을 때.
+#
+# 【왜 필요한가 — 2026-09-04 실측】
+# "2024년 영업이익이 가장 높은 회사는?" 에서 자기가 나열한 값 중에서도
+# 기아(12조 6,671억)가 13배 높은데 삼성E&A(9,716억)를 골랐다.
+# 억원과 백만원이 섞인 값을 눈으로 견준 것이다. 검문 1(needs_calc)은
+# %·배 표기만 잡아서 이 답변을 통과시켰다.
+AUDIT_COMPARE = (
+    "여러 값의 크기를 비교했으나 calculate 를 사용하지 않았다. "
+    "단위가 다른 값이 섞여 있을 수 있다. calculate 로 같은 단위로 환산해 "
+    "비교한 뒤 답변을 다시 작성하라. 그리고 조회한 범위를 답변에 밝혀라."
+)
+# "가장 높/크/많", "최대", "1위" — 지시가 지목한 표현 그대로.
+# '최대' 는 '최대주주' 라는 공시 상용어에 오탐되므로 그 낱말만 먼저 걷어낸다.
+_SUPERLATIVE = ("가장 높", "가장 크", "가장 많", "최대", "1위")
+
 # '4.55배' '234.73%' '3.06 퍼센트' 처럼 **숫자에 붙은** 비율·배수 표기만 잡는다.
 # 그냥 '배' 를 찾으면 배당·배출·배터리·분배가 전부 걸린다.
 _RATIO = re.compile(r"\d[\d,]*(?:\.\d+)?\s*(?:%|퍼센트|배)")
@@ -245,6 +261,29 @@ def all_tools_failed(text: str, tool_calls: list) -> bool:
             return False
         return any(w in (text or "") for w in _ALL_BAD_REFUSE)
     except Exception:                          # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        return False
+
+
+def compares_without_calc(text: str, tool_calls: list) -> bool:
+    """'가장 높다'류 표현 + 숫자 2개 이상인데 calculate 를 안 불렀나.
+
+    【'숫자' 를 어떻게 세는가 — 지시("숫자가 2개 이상")를 좁힌 부분】
+    아무 숫자나 세면 연도가 낀다 — "2024년 영업이익이 가장 높은…" 을 되풀이하는
+    답변은 값이 하나뿐이어도 (2024 + 값) 으로 걸린다. 무근거 표시(`_YEAR`)와 같은
+    기준으로 연도(1900~2100)를 빼고, 3자리 이상 숫자(`_NUM3`)를 **서로 다른 것만**
+    센다. 비교란 서로 다른 값이 둘 이상 있다는 뜻이다.
+    """
+    try:
+        if any((c or {}).get("name") == "calculate" for c in (tool_calls or [])):
+            return False
+        body = (text or "").replace("최대주주", "")   # 상용어 오탐 방지
+        if not any(w in body for w in _SUPERLATIVE):
+            return False
+        nums = {m.group(0).replace(",", "") for m in _NUM3.finditer(body)}
+        nums = {n for n in nums if not _YEAR.match(n)}
+        return len(nums) >= 2
+    except Exception:                          # noqa: BLE001 — 검문이 답을 막으면 안 된다
         traceback.print_exc(file=sys.stderr)
         return False
 
@@ -723,7 +762,8 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
                      "retry_wait_s": 0.0, "resent_prompt_tokens_est": 0,
                      "no_tool_nudge": False, "list_only_nudge": False,
                      "answered_without_tools": False,
-                     # 최종 답변 검문이 걸렸으면 "calc" 또는 "no_search"
+                     # 최종 답변 검문이 걸렸으면 그 종류 —
+                     # calc·compare·no_search·all_bad·announced 중 하나
                      "audit": ""},
            "stopped_by_budget": False, "unsourced_claim": False,
            # 검색이 올린 청크 원문. 평가 서버가 retrieved_context 로 그대로 내보낸다.
@@ -914,6 +954,8 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
                 kind, note = None, None
                 if needs_calc(text, out["tool_calls"], out["documents"]):
                     kind, note = "calc", AUDIT_CALC
+                elif compares_without_calc(text, out["tool_calls"]):
+                    kind, note = "compare", AUDIT_COMPARE
                 elif refused_without_search(text, out["tool_calls"]):
                     kind, note = "no_search", AUDIT_NO_SEARCH
                 elif all_tools_failed(text, out["tool_calls"]):
