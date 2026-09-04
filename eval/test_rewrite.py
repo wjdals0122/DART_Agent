@@ -227,11 +227,13 @@ try:
     rw = R.rewrite_question("OCI홀딩스 제50기 매출은?")
 finally:
     clova.chat = real_chat
-check("fiscal_years=[50] → ki=[50] 으로 이동",
-      rw["ok"] and rw["analysis"]["ki"] == [50] and rw["analysis"]["fiscal_years"] == [],
+# 【step44-B】 ki 자동 환산 되돌림 — 1900 미만 값은 ki 로 옮기지 않고 **버린다**
+check("fiscal_years=[50] → 버린다(ki 로 안 옮김)",
+      rw["ok"] and rw["analysis"]["ki"] == [] and rw["analysis"]["fiscal_years"] == [],
       str(rw["analysis"] and (rw["analysis"]["ki"], rw["analysis"]["fiscal_years"])))
-check("분석 블록에 ki 안내가 들어간다",
-      "ki=50" in R.analysis_block(rw["analysis"]), R.analysis_block(rw["analysis"])[:120])
+check("분석 블록에 ki 안내가 없다",
+      "ki=" not in R.analysis_block(rw["analysis"]),
+      R.analysis_block(rw["analysis"])[:120])
 MIX_JSON = json.dumps(dict(json.loads(GOOD_JSON), fiscal_years=[2024, 76], ki=[]),
                       ensure_ascii=False)
 fake, st = make_chat({"ok": True, "text": MIX_JSON, "tool_calls": [], "usage": {}})
@@ -240,8 +242,8 @@ try:
     rw = R.rewrite_question("질문")
 finally:
     clova.chat = real_chat
-check("연도와 기수가 섞이면 나눈다",
-      rw["analysis"]["fiscal_years"] == [2024] and rw["analysis"]["ki"] == [76],
+check("연도와 기수가 섞이면 연도만 남는다",
+      rw["analysis"]["fiscal_years"] == [2024] and rw["analysis"]["ki"] == [],
       str((rw["analysis"]["fiscal_years"], rw["analysis"]["ki"])))
 
 print()

@@ -113,9 +113,9 @@ def build_prompt() -> str:
         "- 법인명 목록 (companies 에는 이 표기만 쓴다):",
         "  " + _corp_names(),
         "",
-        "[출력 JSON — 이 8개 키를 전부 넣는다]",
+        "[출력 JSON — 이 7개 키를 전부 넣는다]",
         '{"rewritten": "질문을 명확하게 다시 쓴 문장", "sub_questions": ["..."],',
-        ' "companies": [], "fiscal_years": [], "ki": [], "doc_groups": [],',
+        ' "companies": [], "fiscal_years": [], "doc_groups": [],',
         ' "time_note": "", "out_of_scope": false}',
         "",
         "[규칙]",
@@ -135,9 +135,8 @@ def build_prompt() -> str:
         "- fiscal_years: 질문에 명시됐거나('2024년') '작년'처럼 특정 연도로 환산되는",
         "  회계연도(정수)만. 시점이 열려 있는 질문('최신·최종·현재·작성기준일 이후·",
         "  이력·정리·현황')은 **비워라** — 연도를 걸면 다른 해의 건이 통째로 빠진다(실측)",
-        "- ki: '제50기' 같은 기수의 N(정수). **제N기는 fiscal_years 가 아니라",
-        "  ki 에 넣는다. 연도로 환산하지 마라** — 도구가 회사별 표로 환산한다.",
-        "  기수 언급이 없으면 []",
+        "- '제50기' 같은 기수는 연도로 환산하지 말고 fiscal_years 에도 넣지 마라.",
+        "  rewritten 에 '제50기' 표현을 그대로 남겨라 — 검색이 본문에서 기수를 찾는다",
         "- doc_groups: 질문이 공시 유형을 **명시적으로 말했을 때만** 채운다",
         "  (\"주요사항보고서에서\", \"거래소 공시 중\", \"지분공시\" 등).",
         "  periodic(정기보고서)·exchange(거래소 수시공시)·major(주요사항보고서)·",
@@ -278,15 +277,12 @@ def rewrite_question(question, model=None, budget_s=None) -> dict:
                 return out
         # 유형 추정 차단 — 질문이 명시하지 않은 doc_groups 는 여기서 걷어낸다
         a["doc_groups"] = _filter_doc_groups(a.get("doc_groups"), q)
-        # 기수 가드 — fiscal_years 에 1900 미만 값이 오면 그것은 연도가 아니라
-        # 기수다(실측: "제50기" → fiscal_years=[50] → 검색 6회 전부 0건).
-        # ki 로 옮기고 fiscal_years 에서 뺀다. 환산은 도구가 표로 한다.
-        kis = list(a.get("ki") or [])
-        years = []
-        for y in (a.get("fiscal_years") or []):
-            (kis if y < 1900 else years).append(y)
-        a["fiscal_years"] = years
-        a["ki"] = sorted(set(kis))
+        # 기수 가드 — fiscal_years 의 1900 미만 값은 연도가 아니라 기수다.
+        # 【step44-B 되돌림】 ki 자동 환산은 표–벤치 기수 체계가 어긋나는 회사가
+        # 있어(LG유플러스 제28기: 표 2023 vs 정답 기준 2025) **버린다**.
+        # 기수는 rewritten 문장에 남아 검색어로 흘러간다.
+        a["fiscal_years"] = [y for y in (a.get("fiscal_years") or []) if y >= 1900]
+        a["ki"] = []
         out["ok"], out["analysis"] = True, a
         return out
     except Exception as e:                     # noqa: BLE001 — 마지막 방어선
