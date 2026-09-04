@@ -135,6 +135,51 @@ for name, sent in STAY33:
     got = strip_boilerplate(sent)
     check(f"남긴다(step33) — {name}", got.strip() == sent, repr(got))
 
+# step46 — 정정 전 값 대조 문장 제거. 프롬프트([정정공시] 절)로 두 번 샌 자리.
+from src.agent.loop import strip_correction_contrast  # noqa: E402
+
+GO46 = [
+    ("기존 …에서 증가 — 회귀 7번 실측",
+     "최종 계약금액은 644억원입니다. 이는 정정공시를 통해 기존 583억원에서 증가한 금액입니다.",
+     "644", "583"),
+    ("정정 전 …에서 변경 — 회귀 3번 유형",
+     "정정 후 총자본은 57,846십억원이다. 정정 전 57,824십억원에서 변경되었다.",
+     "57,846", "57,824"),
+    ("'이전' + 값",
+     "계약금액은 644억원이다. 이전 계약금액 583억원과는 다르다.",
+     "644", "583"),
+    ("'에서 감소'",
+     "확정 취득금액은 37,413백만원이다. 기존 40,000백만원에서 감소하였다.",
+     "37,413", "40,000"),
+]
+for name, sent, keep, drop in GO46:
+    got = strip_correction_contrast(sent, "최종 계약금액은?")
+    check(f"지운다(step46) — {name}",
+          keep in got and drop not in got, repr(got))
+
+STAY46 = [
+    ("정상 답변", "2024년 연결 매출액은 300,870,903백만원입니다.",
+     "매출액이 얼마야?"),
+    ("질문이 대조를 요구", "최종 계약금액은 644억원입니다. 기존 583억원에서 증가한 금액입니다.",
+     "정정 전 금액과 정정 후 금액이 얼마에서 얼마로 바뀌었어?"),
+    ("'이전' + 연도만(값 없음)", "2023년 이전의 공시는 확인되지 않습니다.",
+     "공시 이력 알려줘"),
+]
+for name, sent, q in STAY46:
+    got = strip_correction_contrast(sent, q)
+    check(f"남긴다(step46) — {name}", got.strip() == sent.strip(), repr(got))
+
+check("지워서 값이 안 남으면 원문 유지(step46)",
+      strip_correction_contrast("기존 583억원에서 증가했습니다.", "질문")
+      == "기존 583억원에서 증가했습니다.")
+for bad in (None, "", "  "):
+    try:
+        strip_correction_contrast(bad, None)
+        ok = True
+    except Exception:                          # noqa: BLE001
+        ok = False
+    check(f"strip_correction_contrast({bad!r}) 예외 없음(step46)", ok)
+
 # step40 (3-F) — 역질문 블록은 상투구가 아니다. 지우면 채점 항목을 잃는다.
 ASKBACK = ("해당 항목은 공시에서 확인되지 않습니다.\n\n"
            "확인 가능한 관련 정보:\n"

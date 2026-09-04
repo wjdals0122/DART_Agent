@@ -970,6 +970,60 @@ def strip_boilerplate(text: str) -> str:
         return text or ""
 
 
+# ---------------------------------------------------------------- 정정 전 값 대조 제거
+#
+# 【왜 코드인가 — step46 실측】 회귀 7번이 644 정답을 찾고도 "기존 583억원에서
+# 증가한" 대조 문장을 붙여 FAIL. 회귀 3번(KB금융 57,824)도 같은 유형이었고
+# step25 에서 [정정공시] 절("대조도 하지 마라")로 막았는데 다시 샜다.
+# **프롬프트로 두 번 실패한 자리다** — 코드로 지운다.
+#
+# 【무엇을 지우는가 — 좁게】
+#   (1) 문장에 대조 표현(기존·이전·정정 전·에서 증가/변경/감소)이 있고
+#   (2) 그 문장에 연도가 아닌 숫자(정정 전 값)가 있고
+#   (3) 지운 뒤에도 답변에 연도 아닌 숫자(정정 후 값)가 남을 때만.
+# 문장 단위로만 지운다. 질문이 정정 전후 차이를 명시적으로 물으면 안 지운다.
+_CONTRAST_WORDS = ("기존", "이전", "정정 전", "에서 증가", "에서 변경", "에서 감소")
+_CONTRAST_ASK = ("정정 전", "변경 전", "얼마에서 얼마로")
+
+
+def _has_value_num(s: str) -> bool:
+    """연도(1900~2100)가 아닌 3자리 이상 숫자가 있나."""
+    return any(not _YEAR.match(m.group(0).replace(",", ""))
+               for m in _NUM3.finditer(s or ""))
+
+
+def strip_correction_contrast(text: str, question: str = "") -> str:
+    """'기존 583억원에서 증가한' 류 정정 전 값 대조 문장을 지운다. 예외 없음."""
+    try:
+        if any(w in (question or "") for w in _CONTRAST_ASK):
+            return text or ""                  # 질문이 대조를 요구했다
+        body = text or ""
+        if not any(w in body for w in _CONTRAST_WORDS):
+            return body
+
+        def is_contrast(sent: str) -> bool:
+            return any(w in sent for w in _CONTRAST_WORDS) and _has_value_num(sent)
+
+        out_paras = []
+        for para in re.split(r"(\n\s*\n)", body):
+            if para.strip() == "" or para.startswith("\n"):
+                out_paras.append(para)         # 문단 구분자는 그대로
+                continue
+            out_lines = []
+            for line in para.split("\n"):
+                kept = [s for s in _SENT.findall(line) if not is_contrast(s)]
+                out_lines.append("".join(kept).rstrip())
+            out_paras.append("\n".join(out_lines).strip("\n"))
+        joined = "".join(out_paras).strip()
+        # 지운 뒤 정정 후 값이 남아 있어야 한다. 없으면 실속을 잃은 것 — 원문 유지
+        if not joined or not _has_value_num(joined):
+            return body
+        return joined
+    except Exception:                          # noqa: BLE001 — 후처리가 답을 막으면 안 된다
+        traceback.print_exc(file=sys.stderr)
+        return text or ""
+
+
 def drop_baseless_geun(text: str) -> str:
     """출처가 하나도 없는데 '근거:' 라고 주장하는 문단을 잘라낸다.
 
@@ -1045,7 +1099,9 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
                      # 검문 후 답변이 되읊기·형식 붕괴라 검문 전 것으로 되돌렸나
                      "audit_reverted": False,
                      # 자리표시자 문단을 걷어냈나
-                     "placeholder_stripped": False},
+                     "placeholder_stripped": False,
+                     # 정정 전 값 대조 문장을 지웠나 (step46)
+                     "contrast_stripped": False},
            # 질문 재작성 단계의 결과. _rewrite_step 이 채운다 — 그 전에 죽어도
            # 키는 있어야 서버 trace 가 "생략" 을 적을 수 있다
            "rewrite": {"ok": False, "note": "실행 안 됨", "analysis": None,
@@ -1068,6 +1124,15 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
     except Exception as e:                     # noqa: BLE001
         traceback.print_exc(file=sys.stderr)
         out["note"] = (out.get("note") or "") + f" · 상투구 제거 실패: {e}"
+    # 정정 전 값 대조 문장 제거(step46) — 프롬프트([정정공시] 절)로 두 번 샌 자리
+    try:
+        stripped = strip_correction_contrast(out["answer"], str(question))
+        if stripped != (out["answer"] or "").strip() and stripped != out["answer"]:
+            out["waste"]["contrast_stripped"] = True
+        out["answer"] = stripped
+    except Exception as e:                     # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        out["note"] = (out.get("note") or "") + f" · 대조 제거 실패: {e}"
     # 자리표시자(프롬프트 예시) 누출은 검문과 무관하게 항상 막는다 (1-B c).
     # e2e_v5 4번에서 예시의 'ㅇㅇ전자 300,870,903' 이 답변으로 나갔다.
     try:
