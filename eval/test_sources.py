@@ -213,6 +213,13 @@ for name, sent in STAY72:
     got = strip_correction_contrast(sent, q72)
     check(f"step72 남긴다 — {name}", got.strip() == sent.strip(), repr(got))
 
+_V4TH = ("최종 계약금액은 644억원입니다. 원래 계약금액은 583억원이었으나, "
+         "이후 변경공시를 통해 644억원으로 증가하였습니다.")
+check("step72 지운다 — '원래 …이었으나' (검증 회귀에서 관측된 네 번째 변형)",
+      "583" not in strip_correction_contrast(_V4TH, "최종 계약금액은?")
+      and "644억원" in strip_correction_contrast(_V4TH, "최종 계약금액은?"),
+      repr(strip_correction_contrast(_V4TH, "최종 계약금액은?")))
+
 check("step72 — 값 보존 가드 유지(지우면 값이 사라지는 경우 원문)",
       strip_correction_contrast("583억원에서 644억원으로 증가했다.", "질문")
       == "583억원에서 644억원으로 증가했다.")
