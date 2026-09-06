@@ -56,6 +56,13 @@ SPEC = [
     ("eval/", False),
     ("docs/", False),
     ("scripts/", False),
+    # 파싱 단계는 src/ 만으로 돌지 않는다. src/normalize/document.py 가
+    # parser/ 의 파서 4종을 sys.path 로 직접 집어 온다(거기 _PARSER_DIR).
+    # 이게 빠지면 03_build_docjson.py 가 import 에서 죽는다 — 재현 불가.
+    ("parser/", False),
+    # XML 이 없는 3건(status 014)의 뷰어 HTML 경로.
+    # scripts/12_rebuild_corrections.py 가 여기 세 부품을 쓴다.
+    ("pdf_parser/", False),
     ("data/index/latest_mask.npz", False),
     ("data/index/doc_fiscal_map.json", False),
     # ── 여기부터 큰 것
@@ -187,6 +194,10 @@ def readme(files: list, code_only: bool) -> str:
         "| `src/tools/` | search_disclosure · list_disclosures · calculate · resolve_company |",
         "| `src/search/` | 하이브리드 검색기(BM25+dense RRF) · 별칭 · 정정 마스크 |",
         "| `src/index/` | 임베딩 단계 코드 |",
+        "| `src/normalize/` · `src/render/` · `parser/` | 원문 XML → 마크다운. "
+        "파이프라인이 실제로 import 하는 파서 4종은 `parser/` 쪽이다 |",
+        "| `pdf_parser/` | XML 이 없는 3건(status 014)의 공시뷰어 HTML 경로. "
+        "`scripts/12_rebuild_corrections.py` 가 쓴다 |",
         "| `prompts/` | planner.txt · system.txt |",
         "| `config/` | tools.json(함수 정의) · aliases.yaml(회사 별칭) |",
         "| `eval/` | Agent 실행기 · e2e 평가 · 검증 스크립트 |",

@@ -159,10 +159,36 @@ def sibling_aliases(corp_name):
     return tuple(max(found, key=len))     # 가장 긴 목록을 기준으로 삼는다
 
 
+def _pin_pdf_parser_periodic():
+    """`periodic_parser` 를 pdf_parser/ 사본으로 못박는다.
+
+    같은 이름의 파일이 pdf_parser/ 와 parser/ 양쪽에 있고 **내용이 다르다**.
+    뷰어 HTML 경로는 pdf_parser/ 쪽으로 만들어졌다(배포본과 SHA 가 같은 것도
+    그쪽이다). sys.path 순서만 믿으면 다른 import 가 parser/ 를 앞에 끼워
+    넣는 순간 조용히 다른 파서로 갈아탄다 — 에러 없이 결과만 달라진다.
+    그래서 경로로 직접 올려 sys.modules 에 먼저 앉힌다.
+    """
+    import importlib.util
+    path = os.path.join(P.REPO_ROOT, 'pdf_parser', 'periodic_parser.py')
+    if P.on_disk(path) is None:
+        raise SystemExit('pdf_parser/periodic_parser.py 가 없다')
+    spec = importlib.util.spec_from_file_location('periodic_parser', path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules['periodic_parser'] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def build_aero():
-    import periodic_parser as pp
+    pp = _pin_pdf_parser_periodic()
     import rag_pipeline
     import viewer_html_parser as vh
+
+    # 부품들이 뒤늦게 parser/ 쪽을 끌어오지 않았는지 확인한다
+    for mod in (vh.pp, rag_pipeline.periodic_parser):
+        if mod is not pp:
+            raise SystemExit('periodic_parser 가 pdf_parser/ 사본이 아니다: %s'
+                             % getattr(mod, '__file__', mod))
 
     src = read_text(AERO_SRC)
     if not vh.looks_like_viewer_html(src):

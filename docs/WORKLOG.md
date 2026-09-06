@@ -7241,3 +7241,42 @@ OK 한화오션_정정사항_20240514001522.md               3,944  SHA-256 일�
 **전사한 상수**다. 이 한 덩어리만 원문→산출물 사슬이 끊겨 있고, 스크립트
 주석에 그렇게 적어 뒀다. 텍스트에 남은 어절 중간 공백("고 려하여", "습
 니다")이 PDF 좌표 추출의 흔적이다 — 고치면 배포본과 달라진다.
+
+---
+
+## step75 — 제출 코드 묶음에 파싱 단계를 넣는다 (2026-09-06)
+
+### 왜 — 배포 코드 묶음만으로는 재현이 안 됐다
+
+`scripts/package_agent.py` 의 `SPEC` 에 `parser/` 가 없었다. 그런데
+`src/normalize/document.py` 는 파서 4종을 `parser/` 에서 `sys.path` 로 직접
+집어 온다. 즉 기존 `dist_agent_code_20260902.zip`(140개 파일)을 풀면
+**`scripts/03_build_docjson.py` 가 import 에서 죽는다** — 원문 XML →
+마크다운 단계가 통째로 빠져 있었다. 서빙은 인덱스만 읽으니 안 드러났다.
+
+### 한 일
+
+- `scripts/package_agent.py` `SPEC` 에 `parser/` · `pdf_parser/` 추가
+  (왜 필요한지 주석으로 남겼다). 배포본 README 표에도 두 줄 추가
+- `scripts/12_rebuild_corrections.py` — `periodic_parser` 를 pdf_parser/ 사본으로
+  **경로로 못박았다**(`_pin_pdf_parser_periodic`). 같은 이름 파일이 pdf_parser/ 와
+  parser/ 양쪽에 있고 내용이 다르다. sys.path 순서만 믿으면 다른 import 가
+  parser/ 를 앞에 끼우는 순간 **에러 없이 결과만 달라진다**. 올린 뒤
+  `viewer_html_parser.pp` · `rag_pipeline.periodic_parser` 가 같은 객체인지도 본다
+
+### 수치
+
+- 묶음 140개 → **175개** 파일 (parser/ 9 · pdf_parser/ 6 · 그 사이 늘어난 것들)
+- `dist_agent_code_20260906.zip` 1.3MB · 1초
+- 못박기 후 재검증 **5/5 통과** (SHA 3건 + 마커 2건)
+- 푼 묶음에서 import 스모크 3종 통과
+  - `src.normalize.document._parsers()` → exchange/holding/major/periodic
+  - `viewer_html_parser` · `rag_pipeline` · `periodic_parser`
+  - `12_rebuild_corrections` import
+
+### 남은 것
+
+`code_handoff/` 는 2026-08-31 스냅샷이고 5.2절에서 `pdf_parser/*.py` 와
+`parser/pdf_periodic_parser.py` 를 "한 번 돌고 끝난 도구"로 제외했다고 적어 뒀다.
+step74·75 이후로는 그 서술이 낡았다 — 손으로 엮은 보고서용 묶음이라
+자동 갱신되지 않는다. 보고서에 쓸 때 확인이 필요하다.
