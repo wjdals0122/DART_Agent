@@ -49,10 +49,18 @@ dist/
 # 프롬프트 정리
 prompt/
 
-# 질문 정리 목록
-Question/'.env' 
-'.env' 
-.env 
+# 질문 정리 목록 — 사람이 만든 벤치마크 문항이고 정답이 같이 들어 있다.
+# eval/run_e2e.py · eval/probe_benchmark.py 가 읽지만 공개 리포에는 올리지 않는다.
+# (공개하기로 정하면 아래 한 줄만 지우면 된다)
+Question/
+
+# 코드 인수인계용 스냅샷 — src/ 를 복사해 둔 것이라 리포에 두 벌이 된다.
+code_handoff/
+
+# API 키. 값은 이 저장소 어디에도 두지 않는다 (README '환경변수' 절 참고).
+.env
+.env.*
+!.env.example
 
 # 인수인계 메모 — 로컬 전용, git 에 올리지 않는다
 HANDOFF.md
@@ -61,3 +69,15 @@ HANDOFF.md
 # 요약은 python eval/token_log.py --summary 로 본다
 eval/token_log.jsonl
 eval/e2e_runs/
+
+# ── 에디터·도구·OS 가 만드는 것들 ────────────────────────────────
+.vscode/
+.idea/
+.claude/
+.DS_Store
+Thumbs.db
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+*.egg-info/
