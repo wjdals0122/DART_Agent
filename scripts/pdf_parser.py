@@ -184,7 +184,7 @@ def build_aero():
     import rag_pipeline
     import viewer_html_parser as vh
 
-    # 부품들이 뒤늦게 parser/ 쪽을 끌어오지 않았는지 확인한다
+   
     for mod in (vh.pp, rag_pipeline.periodic_parser):
         if mod is not pp:
             raise SystemExit('periodic_parser 가 pdf_parser/ 사본이 아니다: %s'
