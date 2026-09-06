@@ -258,6 +258,27 @@ python eval/ask.py "SK하이닉스 2024년 연결 매출액이 얼마야?"
 > BM25 행. 어느 단계에서도 정렬·재배치하지 않는다. 행 수가 하나라도 다르면
 > `verify_vectors` 가 멈춘다.
 
+### XML 이 없는 3건 (`corpus/corrections/`)
+
+DART 가 `document.xml` 을 안 주는 문서가 3건 있다(OpenAPI status 014, manifest 의
+`file_format == "pdf+html"`). KB금융 `20260619000667` · 한화오션 `20240514001522` ·
+한화에어로스페이스 `20260513000860` 이다. `03_build_docjson.py` 는 XML 을 찾으므로
+이 3건을 `no_xml` 로 흘려보낸다 — **위 파이프라인 산출물에는 들어 있지 않다.**
+
+이 3건의 마크다운은 별도 경로로 만들어 `corpus/corrections/` 에 5개 파일로 둔다.
+그 경로를 리포 안에서 다시 돌리는 것이 아래 스크립트다.
+
+```bash
+python scripts/12_rebuild_corrections.py     # 재생성 + 배포본 대조 (corpus/ 는 안 건드림)
+```
+
+한화에어로스페이스 본문(1.27MB)은 `corpus/raw/` 의 공시뷰어 HTML 에서 **SHA-256 까지
+그대로 재현된다.** KB금융·한화오션은 정정공시라 본문을 새로 뽑지 않고, 정정 대상
+원본(이쪽은 XML 이 있다)에 정정 위치 마커를 얹은 사본과 정정된 부분만 담은 델타
+파일을 만든다. PDF 에서 글자를 뽑는 코드는 리포에 없다 — 왜 PDF 가 아니라 HTML
+이었는지는 [pdf_parser/README_viewer_html.md](pdf_parser/README_viewer_html.md) 에
+실측으로 적어 뒀다.
+
 ---
 
 ## 서버 실행
