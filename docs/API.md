@@ -3,7 +3,8 @@
 **End-point: `http://49.50.141.125`** (http · 인증 헤더 없음)
 
 구현: [src/api/server.py](../src/api/server.py) · uvicorn 위의 **순수 ASGI**
-(FastAPI를 쓰지 않는다 — 아래 [한글 인코딩](#한글-인코딩) 참고)
+(서버 venv에 `fastapi 0.141.1` 이 설치돼 있으나 그 경로는 타지 않는다.
+`DART_API_FASTAPI=1` 일 때만 쓴다 — 아래 [한글 인코딩](#6-한글-인코딩) 참고)
 
 ---
 

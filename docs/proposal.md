@@ -427,6 +427,31 @@ GPU 없는 서버에서 CPU로 돈다. 판단은 `gpu_guard.cuda_ok()` 한 곳�
 (`FORCE_CPU=1` 로 개발 PC에서 서버를 재현할 수 있고, 검색 결과가 서버와
 완전히 일치하는 것을 확인했다[^h]).
 
+**실제 서비스 환경**(서버 venv `pip freeze` 실측, 2026-09-06)[^sv]:
+
+| | 운영 서버 | (참고) 개발 PC |
+|---|---|---|
+| `torch` | **2.14.0+cpu** | 2.7.1+cu118 |
+| `pandas` | **3.0.5** | 2.3.0 |
+| `scipy` | **1.17.1** | 1.13.1 |
+| `numpy` · `pyarrow` | 1.26.4 · 25.0.1 | 1.26.0 · 25.0.1 |
+| `FlagEmbedding` · `kiwipiepy` | 1.4.2 · 0.23.2 | 동일 |
+| `uvicorn` | 0.52.4 | 0.40.0 |
+| `fastapi` | 0.141.1 (설치돼 있으나 쓰이지 않는다) | 미설치 |
+
+개발 PC와 서버의 버전이 `pandas`·`scipy`·`torch` 에서 갈리는데
+**두 환경 모두에서 동작하는 것을 실측으로 확인했다** — 서버는 실질의에 정답을
+반환하고, 개발 PC는 `FORCE_CPU=1` 에서 서버와 검색 결과가 일치한다.
+`requirements.txt` 는 두 환경을 다 받아들이도록 하한만 걸어 두었다.
+
+**API 껍데기는 항상 순수 ASGI다.** 서버에 `fastapi` 가 깔려 있지만 그 경로는
+타지 않고, `DART_API_FASTAPI=1` 을 명시할 때만 쓴다. 예전에는 "fastapi 가 있으면
+그쪽을 쓴다" 였는데 Starlette이 쿼리를 UTF-8 고정으로 디코딩해 **cp949로 보내는
+클라이언트의 한글 질문이 통째로 깨졌다**(실측: `하이` → `%c7%cf%c0%cc`).
+로컬에 fastapi를 설치할 수 없어(pydantic이 임베딩 환경을 흔든다) **시험되지 않은
+경로를 기본으로 둔 것**이 사고의 원인이었다. 지금은 `GET /` 응답으로 어느 껍데기가
+떠 있는지 확인한다 — 현재 `{"service":"공시 Agent 평가 API",...}`, 즉 순수 ASGI다.
+
 **운영 실측(2026-09-06 09:44)**: `/health` → `{"status":"ok","warm_seconds":8.7,
 "served":11,"uptime":116737.9}` — 무중단 **32.4시간**. 실질의 8.9초 · 12,511 bytes.
 
@@ -653,3 +678,5 @@ HD현대일렉트릭 고압차단기 계약에서 최초 공시(583억)를 찾�
 [^kk]: `reports/kakao_2024_revenue_probe.md` — 카카오 2024 매출액 전량 조사
        (2026-09-05, LLM 0회)
 [^tk]: `python eval/token_log.py --summary` (2026-09-06) · `eval/token_log.jsonl`
+[^sv]: 서버 venv `pip freeze` 실측 (2026-09-06) — 운영 서버 `49.50.141.125`
+       `/root/dis-044/venv`. 개발 PC 값은 `importlib.metadata` 로 확인한 것이다

@@ -52,7 +52,7 @@ LLM은 과제 제약에 따라 HyperCLOVA X만 쓰고, 임베딩은 로컬 GPU�
 | 항목 | 값 |
 |---|---|
 | Python | **3.12** |
-| 운영 서버 | Ubuntu · 4 vCPU · 16GB RAM · GPU 없음 (CPU 폴백으로 동작) |
+| 운영 서버 | Ubuntu · 4 vCPU · 16GB RAM · **GPU 없음** (CPU로 동작) |
 | 개발/색인 | RTX 4090 24GB × 4 · Xeon Gold 6326 · RAM 384GB |
 
 ```bash
@@ -61,23 +61,73 @@ source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-**torch는 별도 설치한다.** CUDA 버전에 맞춰야 한다.
+### 실제 서비스 환경 버전 (서버 venv `pip freeze` 실측, 2026-09-06)
+
+**아래가 엔드포인트를 돌리고 있는 실제 버전이다.**
+
+| 패키지 | 운영 서버 | (참고) 개발 PC |
+|---|---|---|
+| `torch` | **2.14.0+cpu** | 2.7.1+cu118 |
+| `pandas` | **3.0.5** | 2.3.0 |
+| `scipy` | **1.17.1** | 1.13.1 |
+| `numpy` | 1.26.4 | 1.26.0 |
+| `uvicorn` | 0.52.4 | 0.40.0 |
+| `pyarrow` | 25.0.1 | 25.0.1 |
+| `FlagEmbedding` | 1.4.2 | 1.4.2 |
+| `kiwipiepy` (+ `kiwipiepy_model` 0.23.0) | 0.23.2 | 0.23.2 |
+| `fastapi` | 0.141.1 (설치돼 있으나 **쓰이지 않는다** — 아래 참고) | 미설치 |
+
+> **개발 PC와 서버의 버전이 다르다.** 특히 `pandas`(2.3.0 ↔ 3.0.5) ·
+> `scipy`(1.13.1 ↔ 1.17.1) · `torch`(CUDA ↔ CPU)가 메이저/마이너로 갈린다.
+> **두 환경 모두에서 동작하는 것을 실측으로 확인했다** — 서버는 실질의에
+> 정답을 반환하고(8.9초), 개발 PC는 `FORCE_CPU=1` 에서 서버와 검색 결과가 일치한다.
+> `requirements.txt` 는 두 환경을 다 받아들이도록 하한만 걸어 두었다.
+
+### torch — 서버는 CPU 빌드다
+
+임베딩·검색 모두 GPU 없이 돈다. **PyPI 기본 `torch` 는 CUDA 런타임을 함께
+끌고 오므로 CPU 서버에서는 CPU 전용 인덱스를 써야 한다.**
 
 ```bash
-# 색인·임베딩 환경 (이 레포를 돌린 버전: 2.7.1+cu118)
-pip install torch --index-url https://download.pytorch.org/whl/cu118
-# GPU 없는 서버
+# 운영 서버 (GPU 없음) — 실제 설치된 것: 2.14.0+cpu
 pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# 색인·임베딩 장비 (GPU) — 이 레포로 벡터를 만든 버전: 2.7.1+cu118
+pip install torch --index-url https://download.pytorch.org/whl/cu118
 ```
 
+CPU/GPU 판단은 코드 한 곳(`src/eval/gpu_guard.cuda_ok()`)에서만 한다.
+GPU가 없거나 `FORCE_CPU=1` 이면 CPU로 내려앉는다.
+CPU 실측: 첫 질의 4.4초(워밍업) · 이후 100~210ms · RAM 4.35GB.
+
 시스템 패키지: 별도로 필요한 것은 없다. `kiwipiepy`(한국어 형태소 분석기)가
-휠로 설치되며 컴파일러를 요구하지 않는다.
+휠로 설치되며 컴파일러를 요구하지 않는다. `kiwipiepy_model` 은 `kiwipiepy` 가
+자동으로 끌고 온다.
+
+### FastAPI — 설치돼 있어도 쓰이지 않는다
+
+API 서버는 **기본이 uvicorn 위의 순수 ASGI** 다. 서버 venv에 `fastapi 0.141.1` 이
+설치돼 있지만 그 경로는 타지 않는다. `DART_API_FASTAPI=1` 을 **명시할 때만**
+FastAPI 껍데기를 쓴다.
+
+```bash
+curl http://49.50.141.125/
+# {"service":"공시 Agent 평가 API", ...}   ← 순수 ASGI (현재 상태 · 정상)
+# {"detail":"Not Found"}                   ← FastAPI 경로였다면 이렇게 나온다
+```
+
+**왜 기본을 되돌렸나** — 예전에는 "fastapi 가 있으면 그쪽을 쓴다" 였는데,
+Starlette이 쿼리를 UTF-8 고정 + `errors=replace` 로 디코딩해서 **cp949로 보내는
+클라이언트의 한글 질문이 통째로 깨졌다**(실측: `하이` → `%c7%cf%c0%cc`).
+지금은 항상 순수 ASGI로 뜨고, FastAPI 경로를 쓸 때도 쿼리는 같은 `_params()` 로
+바이트 단계에서 읽는다. 자세한 것은 `HANDOFF.md` §15.
 
 ### 하지 말 것
 
 - **`pip install -U` 금지.** torch/FlagEmbedding 버전에 bge-m3 벡터가 묶여 있다.
-- **`fastapi` 를 설치하지 않는다.** pydantic 2.8.2 → 2.13.5 를 함께 올려 임베딩
-  환경을 흔든다. API 서버는 uvicorn만으로 도는 순수 ASGI다.
+- **개발 PC에는 `fastapi` 를 설치하지 않는다.** pydantic 2.8.2 → 2.13.5 를 함께
+  올려 임베딩 환경을 흔든다(실측). 서버는 이미 설치돼 있으나 쓰이지 않으므로
+  그대로 둔다.
 
 ### 임베딩 모델 캐시
 
