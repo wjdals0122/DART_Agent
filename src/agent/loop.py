@@ -128,6 +128,84 @@ REVIEW = (
     "붙이지 마라. 검토했다는 사실 자체를 언급하지 마라."
 )
 
+# ------------------------------------------- 계약 확정 질문: 진행상황 표 선조회 (step54)
+#
+# 【왜 코드로 하는가 — 실측】
+# 회귀 7번(HD현대일렉트릭 고압차단기 계약 확정금액) 최근 7표본 중 PASS 3 / FAIL 4.
+# `get_progress_table` 을 **부르면 2/2 정답**이고, 안 부르면 정정 전 583억을 답한다.
+# 도구 설명·planner 강조(step45)로는 확률만 움직였고 결정적이지 않았다.
+# 그래서 부를지 말지를 모델에게 맡기지 않고, 조건이 맞으면 **먼저 부른다.**
+#
+# 조건은 좁게 잡는다 — 계약·수주·투자의 '지금 값이 무엇이냐' 를 묻는 질문만.
+# 둘 다 있어야 한다(주제 × 확정성). 한쪽만으로는 발동하지 않는다.
+_PROGRESS_SUBJECT = ("계약", "수주", "투자")
+_PROGRESS_ASPECT = ("최종", "확정", "정정", "변경", "진행")
+
+# 선조회 결과 앞에 붙이는 안내. 도구 결과가 아니라 사용자 턴으로 들어가므로
+# 무엇인지 말해 주지 않으면 모델이 질문의 일부로 읽는다.
+PROGRESS_PREFETCH = (
+    "[선조회] 이 질문은 계약·수주·투자의 최종·확정·변경·진행 상태를 묻고 있다. "
+    "거래소공시만으로는 정정 후 확정치를 알 수 없으므로 "
+    "get_progress_table 을 **미리 호출해 두었다.** 아래가 그 결과다. "
+    "최종 확정금액과 정정 이력이 여기에 있으니 먼저 확인하고, "
+    "같은 도구를 다시 부르지 마라. 이 조회는 호출 한도에 포함되지 않는다."
+)
+
+
+def needs_progress_prefetch(question) -> bool:
+    """계약 확정 질문인가. 예외를 던지지 않는다."""
+    try:
+        q = str(question or "")
+        return (any(w in q for w in _PROGRESS_SUBJECT)
+                and any(w in q for w in _PROGRESS_ASPECT))
+    except Exception:                          # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        return False
+
+
+def _prefetch_progress(question, out) -> str:
+    """조건이 맞으면 진행상황 표를 미리 조회해 대화에 붙일 문자열을 돌려준다.
+
+    못 부르거나 결과가 없으면 **빈 문자열** — 조용히 넘어간다.
+    호출 횟수(n_calls)를 올리지 않으므로 도구 6회 상한에 포함되지 않는다.
+    다만 `out["tool_calls"]` 에는 남긴다 — 검문·추적선이 "근거를 확보했다" 를
+    알아야 한다(안 남기면 FORCE_TOOL 되돌림이 헛돈다).
+    """
+    try:
+        if not needs_progress_prefetch(question):
+            return ""
+        a = ((out.get("rewrite") or {}).get("analysis") or {})
+        corp = next((str(c).strip() for c in (a.get("companies") or [])
+                     if str(c).strip()), "")
+        if not corp:                           # 회사가 특정되지 않으면 부르지 않는다
+            return ""
+        from src.tools import TOOLS
+
+        fn = TOOLS.get("get_progress_table")
+        if fn is None:
+            return ""
+        t2 = time.time()
+        tool_out = fn(corp_name=corp)
+        out["tool_seconds"] += time.time() - t2
+        if tool_out.get("status") != "ok" or not (tool_out.get("results") or []):
+            return ""                          # not_found -> 아무것도 넣지 않는다
+        for s in (tool_out.get("sources") or []):
+            if s not in out["sources"]:
+                out["sources"].append(s)
+        _keep_documents(out, "get_progress_table", tool_out)
+        out["tool_calls"].append({
+            "n": 0, "name": "get_progress_table",
+            "arguments": {"corp_name": corp},
+            "status": tool_out.get("status"),
+            "summary": "진행상황 표 선조회 · " + _summary("get_progress_table", tool_out),
+            "note": tool_out.get("note") or ""})
+        out["waste"]["progress_prefetch"] = True
+        return PROGRESS_PREFETCH + "\n\n" + _render("get_progress_table", tool_out)
+    except Exception:                          # noqa: BLE001 — 선조회가 답을 막으면 안 된다
+        traceback.print_exc(file=sys.stderr)
+        return ""
+
+
 # ---------------------------------------------------------------- 최종 답변 검문
 #
 # 【왜 코드인가】
@@ -1101,7 +1179,10 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
                      # 자리표시자 문단을 걷어냈나
                      "placeholder_stripped": False,
                      # 정정 전 값 대조 문장을 지웠나 (step46)
-                     "contrast_stripped": False},
+                     "contrast_stripped": False,
+                     # 계약 확정 질문에서 진행상황 표를 선조회했나 (step54).
+                     # 도구 6회 상한에는 포함되지 않는 호출이다
+                     "progress_prefetch": False},
            # 질문 재작성 단계의 결과. _rewrite_step 이 채운다 — 그 전에 죽어도
            # 키는 있어야 서버 trace 가 "생략" 을 적을 수 있다
            "rewrite": {"ok": False, "note": "실행 안 됨", "analysis": None,
@@ -1314,8 +1395,13 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
 
     analysis = _rewrite_step(question, out, model, qid)
     tools = load_tools()
+    # 계약 확정 질문이면 진행상황 표를 먼저 조회해 첫 사용자 턴에 함께 넣는다.
+    # 별도 user 메시지로 쪼개지 않는 이유 — user 가 연달아 두 번 오는 형태는
+    # 이 API 에서 시험된 적이 없다. 한 턴 안에 넣으면 모양이 지금과 같다.
+    pre = _prefetch_progress(question, out)
+    user_content = str(question) + (("\n\n" + pre) if pre else "")
     msgs = [{"role": "system", "content": build_system(analysis)},
-            {"role": "user", "content": str(question)}]
+            {"role": "user", "content": user_content}]
     cache: dict = {}
     n_calls = 0
     reminded = False           # 리마인더는 딱 한 번만 넣는다

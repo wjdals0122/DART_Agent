@@ -114,6 +114,108 @@ check("다른 절에는 경고가 없다", "(변경공시" not in ctx2)
 
 print()
 print("=" * 74)
+print("진행상황 표 선조회 (step54) — LLM·인덱스 0회")
+print("=" * 74)
+
+from src.agent import loop as L  # noqa: E402
+
+# (a) 조건 매칭 — 부르는 질문 4종
+for _q in ["HD현대일렉트릭이 2024년 1월 30일 체결한 고압차단기 공급계약의 최종 계약금액은?",
+           "수주 금액이 정정된 내역 알려줘",
+           "그 투자 계획은 변경됐어?",
+           "공급계약 진행 상황이 어떻게 돼?"]:
+    check(f"선조회 O: {_q[:26]}", L.needs_progress_prefetch(_q) is True)
+
+# (b) 조건 매칭 — 안 부르는 질문 4종
+for _q in ["삼성전자 2024년 연결 매출액이 얼마야?",          # 주제·확정성 둘 다 없음
+           "HD현대일렉트릭의 고압차단기 공급계약 상대방은?",     # 주제만 있음
+           "최종 배당금은 얼마야?",                          # 확정성만 있음
+           "임원 현황 알려줘"]:
+    check(f"선조회 X: {_q[:26]}", L.needs_progress_prefetch(_q) is False)
+
+check("빈 입력·None 에 예외 없음",
+      L.needs_progress_prefetch("") is False and L.needs_progress_prefetch(None) is False)
+
+# (c) 회사가 특정되지 않으면 부르지 않는다
+_called = {"n": 0}
+
+
+def _fake_progress(corp_name=None, **kw):
+    _called["n"] += 1
+    return {"status": "ok", "note": "", "sources": ["[HD현대일렉트릭 …]"],
+            "results": [{"chunk_id": "c1", "text": "계약금액총액 644억원",
+                         "source": {"corp_name": "HD현대일렉트릭",
+                                    "report_nm": "사업보고서 (2024.12)",
+                                    "rcept_no": "20250320000001",
+                                    "rcept_dt": "20250320",
+                                    "section": "XI. … > 1. 공시내용 진행 및 변경사항"}}]}
+
+
+def _fresh_out(companies):
+    return {"sources": [], "documents": [], "tool_calls": [], "tool_seconds": 0.0,
+            "waste": {"progress_prefetch": False},
+            "rewrite": {"ok": bool(companies), "analysis":
+                        ({"companies": companies} if companies else None)}}
+
+
+import src.tools as T  # noqa: E402
+_real = T.TOOLS.get("get_progress_table")
+T.TOOLS["get_progress_table"] = _fake_progress
+try:
+    Q = "고압차단기 공급계약의 최종 계약금액은?"
+    _called["n"] = 0
+    o = _fresh_out(None)
+    pre = L._prefetch_progress(Q, o)
+    check("회사가 없으면 호출하지 않는다", pre == "" and _called["n"] == 0,
+          f"pre={pre[:30]!r} calls={_called['n']}")
+    check("그 경우 tool_calls 도 안 늘어난다", o["tool_calls"] == [])
+
+    # (d) 정상 경로
+    _called["n"] = 0
+    o = _fresh_out(["HD현대일렉트릭"])
+    pre = L._prefetch_progress(Q, o)
+    check("조건이 맞으면 1회 호출된다", _called["n"] == 1, str(_called["n"]))
+    check("선조회 안내가 앞에 붙는다", pre.startswith("[선조회]"), pre[:40])
+    check("표 본문이 들어간다", "644억원" in pre, pre[-80:])
+    check("tool_calls 에 기록된다", len(o["tool_calls"]) == 1
+          and o["tool_calls"][0]["name"] == "get_progress_table")
+    check("think_trace 용 '진행상황 표 선조회' 문구가 남는다",
+          "진행상황 표 선조회" in o["tool_calls"][0]["summary"],
+          o["tool_calls"][0]["summary"])
+    check("호출 한도 밖임을 n=0 으로 표시한다", o["tool_calls"][0]["n"] == 0)
+    check("documents 에 청크가 들어간다", len(o["documents"]) == 1)
+    check("sources 가 합쳐진다", o["sources"] == ["[HD현대일렉트릭 …]"])
+    check("waste 플래그가 선다", o["waste"]["progress_prefetch"] is True)
+
+    # (e) 조건에 안 맞으면 회사가 있어도 안 부른다
+    _called["n"] = 0
+    o = _fresh_out(["삼성전자"])
+    pre = L._prefetch_progress("삼성전자 2024년 연결 매출액이 얼마야?", o)
+    check("조건 불일치면 호출 0회", pre == "" and _called["n"] == 0)
+
+    # (f) not_found 면 조용히 넘어간다
+    T.TOOLS["get_progress_table"] = lambda **kw: {"status": "not_found",
+                                                  "note": "표를 찾지 못했다",
+                                                  "results": [], "sources": []}
+    o = _fresh_out(["HD현대일렉트릭"])
+    pre = L._prefetch_progress(Q, o)
+    check("not_found 면 아무것도 넣지 않는다",
+          pre == "" and o["tool_calls"] == [] and o["documents"] == []
+          and o["sources"] == [], f"pre={pre[:30]!r}")
+
+    # (g) 도구가 터져도 답을 막지 않는다
+    def _boom(**kw):
+        raise RuntimeError("터짐")
+
+    T.TOOLS["get_progress_table"] = _boom
+    o = _fresh_out(["HD현대일렉트릭"])
+    check("도구 예외를 삼키고 빈 문자열", L._prefetch_progress(Q, o) == "")
+finally:
+    if _real is not None:
+        T.TOOLS["get_progress_table"] = _real
+
+print()
+print("=" * 74)
 if FAIL:
     print(f"{len(FAIL)}건 실패: " + ", ".join(FAIL))
     sys.exit(1)
