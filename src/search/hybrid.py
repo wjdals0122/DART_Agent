@@ -256,6 +256,9 @@ class Retriever:
         self.receipt_no = idm["receipt_no"].to_numpy(dtype=object)
         self.receipt_i = idm["receipt_no"].astype(np.int64).to_numpy()
         self.doc_id = idm["doc_id"].to_numpy(dtype=object)
+        # 후보 안에 문서가 몇 개인지 세는 데만 쓴다(문서당 상한 계산 — step47).
+        # doc_id 는 문자열이라 50만 행에서 np.unique 가 느리다. 정수로 한 번만 바꿔 둔다.
+        self.doc_code = pd.factorize(idm["doc_id"])[0].astype(np.int32)
         self.chunk_id = idm["chunk_id"].to_numpy(dtype=object)
         self.embed_sha1 = idm["embed_sha1"].to_numpy(dtype=object)
         self.report_nm = idm["report_nm"].to_numpy(dtype=object)
@@ -530,6 +533,22 @@ class Retriever:
                        key=lambda i: (-float(rrf[i]), -int(self.receipt_i[cand[i]])))
 
         # C9 — (a) 문서당 상한 → (b) sha1 중복 제거 → pool 확보
+        #
+        # 【문서당 상한을 후보 문서 수에 맞춘다 — step47, 2026-09-06】
+        # 상한이 2로 고정이면 후보 문서가 적을 때 pool 이 말라붙는다. 실측(카카오
+        # 2024 매출액): corp_name+fiscal_year+annual 로 좁히면 후보 문서가 4개뿐이라
+        # pool 최대치가 4×2=8 이 되고 POOL=50 이 무의미해진다. 그 상태에서 정답인
+        # 「연결 포괄손익계산서」 표 본문 청크가 RRF 3위였는데도 **같은 문서의 다른
+        # 조각 두 개**(별도 포괄손익계산서·표 꼬리)에 밀려 잘려 나갔다.
+        # 넓은 표가 여러 청크로 쪼개진 문서에서 특히 잘 터진다.
+        #
+        # 그래서 후보 문서가 적을수록 상한을 올린다. 다만 한 문서가 pool 을 통째로
+        # 먹으면 안 되므로 pool//2 로 막는다. 문서가 pool//PER_DOC(=25)개 이상이면
+        # 계산값이 2 이하라 **지금과 완전히 같다** — 넓은 검색은 건드리지 않는다.
+        # 호출자가 준 per_doc 은 하한으로 존중한다(run_eval 의 --per-doc 50 등).
+        n_docs = int(np.unique(self.doc_code[cand]).size)
+        per_doc = max(per_doc, min(pool // max(1, n_docs), pool // 2))
+
         picked: list[tuple[int, int]] = []               # (전체 row, 후보 인덱스)
         seen_sha: set = set()
         per: dict = {}
