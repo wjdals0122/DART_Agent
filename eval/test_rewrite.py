@@ -395,6 +395,99 @@ check("range_note 만 있어도 블록이 나온다",
 
 print()
 print("=" * 74)
+print("5-F — 여러 시점에 걸친 질문: 연도 필터를 비운다 (step53)")
+print("=" * 74)
+
+# (a) 판정 함수 — 비우는 경우 5종
+for _q in ["SK하이닉스의 최근 자금조달 및 지분변동",
+           "지금 거래처가 어디야",
+           "현재 사업 현황 알려줘",
+           "최신 정정공시 내용은",
+           "지분율 변동 이력 정리해줘"]:
+    check(f"비움 판정: {_q}", R.is_multi_period(_q) is True)
+
+# (b) 판정 함수 — 안 비우는 경우 5종
+for _q in ["2024년 매출",
+           "제77기 영업이익",
+           "작년 실적",
+           "삼성전자 매출은?",
+           "올해 영업이익"]:
+    check(f"유지 판정: {_q}", R.is_multi_period(_q) is False)
+
+# (c) 연도·기수가 함께 있으면 낱말이 있어도 유지한다
+check("'2024년 최근 현황' → 연도가 있으므로 유지",
+      R.is_multi_period("2024년 최근 현황") is False)
+check("'제50기 지분 변동' → 기수가 있으므로 유지",
+      R.is_multi_period("제50기 지분 변동") is False)
+check("'제 50 기' 처럼 띄어써도 잡는다",
+      R.is_multi_period("제 50 기 지분 변동") is False)
+check("범위 밖 4자리 수는 연도로 안 본다(1999)",
+      R.is_multi_period("1999 최근 현황") is True)
+check("빈 입력·None 에 예외 없음",
+      R.is_multi_period("") is False and R.is_multi_period(None) is False)
+
+# (d) rewrite_question 통과 후 — 연도가 비고 안내가 붙는가
+MP_JSON = json.dumps(dict(json.loads(GOOD_JSON), fiscal_years=[2024], ki=[]),
+                     ensure_ascii=False)
+fake, st = make_chat({"ok": True, "text": MP_JSON, "tool_calls": [], "usage": {}})
+clova.chat = fake
+try:
+    rw = R.rewrite_question("SK하이닉스의 최근 자금조달 및 지분변동")
+finally:
+    clova.chat = real_chat
+blk = R.analysis_block(rw["analysis"])
+check("재작성이 채운 fiscal_years=[2024] 가 비워진다",
+      rw["ok"] and rw["analysis"]["fiscal_years"] == [],
+      str(rw["analysis"] and rw["analysis"]["fiscal_years"]))
+check("블록에 '여러 시점에 걸친 질문' 안내가 붙는다",
+      "여러 시점에 걸친 질문이다" in blk, blk[:220])
+check("안내에 '사업보고서를 우선' 이 있다",
+      "사업보고서를 우선한다" in blk, blk[:220])
+check("블록에 '회계연도:' 줄이 없다", "- 회계연도: " not in blk, blk[:220])
+
+# (e) 연도가 있는 질문은 그대로 통과한다
+KEEP_JSON = json.dumps(dict(json.loads(GOOD_JSON), fiscal_years=[2024], ki=[]),
+                       ensure_ascii=False)
+fake, st = make_chat({"ok": True, "text": KEEP_JSON, "tool_calls": [], "usage": {}})
+clova.chat = fake
+try:
+    rw2 = R.rewrite_question("SK하이닉스 2024년 매출액")
+finally:
+    clova.chat = real_chat
+blk2 = R.analysis_block(rw2["analysis"])
+check("연도가 명시된 질문은 fiscal_years 를 유지한다",
+      rw2["analysis"]["fiscal_years"] == [2024],
+      str(rw2["analysis"]["fiscal_years"]))
+check("그 경우 '여러 시점' 안내가 없다",
+      "여러 시점에 걸친 질문이다" not in blk2, blk2[:220])
+check("블록에 '회계연도: 2024' 가 있다", "- 회계연도: 2024" in blk2, blk2[:220])
+
+# (f) 상대 연도('작년')는 건드리지 않는다 — 재작성 환산에 맡긴다
+fake, st = make_chat({"ok": True, "text": KEEP_JSON, "tool_calls": [], "usage": {}})
+clova.chat = fake
+try:
+    rw3 = R.rewrite_question("SK하이닉스 작년 실적")
+finally:
+    clova.chat = real_chat
+check("'작년' 은 환산 결과를 그대로 둔다",
+      rw3["analysis"]["fiscal_years"] == [2024],
+      str(rw3["analysis"]["fiscal_years"]))
+
+# (g) 범위 밖 연도 안내(step52)와 함께 와도 둘 다 남는다
+FUT2 = json.dumps(dict(json.loads(GOOD_JSON), fiscal_years=[2027], ki=[]),
+                  ensure_ascii=False)
+fake, st = make_chat({"ok": True, "text": FUT2, "tool_calls": [], "usage": {}})
+clova.chat = fake
+try:
+    rw4 = R.rewrite_question("최근 지분 변동")
+finally:
+    clova.chat = real_chat
+blk4 = R.analysis_block(rw4["analysis"])
+check("범위 밖 안내와 여러 시점 안내가 함께 남는다",
+      "2027년" in blk4 and "여러 시점에 걸친 질문이다" in blk4, blk4[:300])
+
+print()
+print("=" * 74)
 print("6 — DART_REWRITE=0 이면 재작성을 부르지 않는다")
 print("=" * 74)
 os.environ["DART_REWRITE"] = "0"

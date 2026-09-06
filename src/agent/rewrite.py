@@ -71,6 +71,45 @@ _FY_NOTE_PAST = (
 )
 
 
+# ------------------------------------------------- 여러 시점에 걸친 질문 (step53)
+#
+# 【왜 코드로 하는가 — 실측 2026-09-06】
+# "SK하이닉스의 최근 자금조달 및 지분변동" 을 두 번 돌렸더니 답이 갈렸다.
+#   1회차  근거 2023.06~2026.03 (7건) — 좋은 답
+#   2회차  근거 2024.03~2024.12 (4건) — 단위 1000배 오류 · 최대주주 혼동
+# 재작성기가 실행마다 fiscal_years 를 다르게 채운 탓이다. 프롬프트 규칙(2-B)으로는
+# 매번 지켜지지 않는다 — 같은 질문에 답이 갈리는 것을 프롬프트로 막을 수 없다.
+#
+# 【조건을 좁게 잡은 이유】
+# "연도가 없으면 전부 비운다" 로 하면 "삼성전자 매출은?" 까지 필터가 빠져 후보가
+# 4배가 된다. 그래서 **여러 시점을 훑어야 답이 되는 질문**만 고른다.
+#   (a) 질문 원문에 4자리 연도(2020~2030)도 '제N기' 표기도 없고
+#   (b) 아래 낱말 중 하나가 있을 때
+# '작년·전년·올해' 같은 상대 연도는 **건드리지 않는다** — 재작성 환산에 맡긴다.
+_Q_YEAR = re.compile(r"(?<!\d)20(?:2\d|30)(?!\d)")      # 2020~2030
+_Q_KI = re.compile(r"제\s*\d+\s*기")
+_MULTI_PERIOD_WORDS = ("최근", "지금", "현재", "요즘", "최신",
+                       "이력", "추이", "변동", "현황")
+
+# 【부작용 대비】 필터를 빼면 후보가 늘어 분기·반기가 상위를 잠식할 수 있다.
+# 그래서 "연간 실적은 사업보고서 우선" 을 안내에 넣는다. report_type 을 코드가
+# 강제하지는 **않는다** — 그러면 분기를 묻는 질문을 막게 된다.
+_MULTI_PERIOD_NOTE = ("여러 시점에 걸친 질문이다. 연도 필터 없이 조회하되, "
+                      "연간 실적을 묻는 경우 사업보고서를 우선한다")
+
+
+def is_multi_period(question) -> bool:
+    """질문이 '여러 시점에 걸친' 것인가. 예외를 던지지 않는다."""
+    try:
+        q = str(question or "")
+        if _Q_YEAR.search(q) or _Q_KI.search(q):
+            return False
+        return any(w in q for w in _MULTI_PERIOD_WORDS)
+    except Exception:                          # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        return False
+
+
 def clip_fiscal_years(years) -> tuple:
     """(코퍼스 범위 안의 연도만, 범위 밖에 대한 안내 문자열).
 
@@ -348,6 +387,14 @@ def rewrite_question(question, model=None, budget_s=None) -> dict:
         # range_note 는 **코드만 채운다** — _DEFAULTS 에 없으므로 LLM 이 넣어도
         # _parse 에서 이미 버려졌다. 여기서 무조건 덮어쓴다.
         a["fiscal_years"], a["range_note"] = clip_fiscal_years(a["fiscal_years"])
+        # 여러 시점에 걸친 질문이면 연도 필터를 비운다 — 재작성기가 실행마다 다르게
+        # 채워 같은 질문에 답이 갈렸다(step53 주석의 실측).
+        # 안내는 **연도 필터가 비게 되었을 때** 붙인다. 재작성기가 애초에 비워 보낸
+        # 경우에도 상황은 같으므로, 여기서 갈리면 결정적으로 만드는 의미가 없다.
+        if is_multi_period(q):
+            a["fiscal_years"] = []
+            a["range_note"] = " / ".join(
+                x for x in (a["range_note"], _MULTI_PERIOD_NOTE) if x)
         # 【step44-E 되돌림】 out_of_scope 오판이 도구 0회 거절을 만들었다(v6 1·9).
         # 필드는 프롬프트에서 뺐고, 남아 들어와도 무시한다 — 범위 판단은 검색이 한다.
         a["out_of_scope"] = False
