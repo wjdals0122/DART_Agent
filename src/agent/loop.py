@@ -163,13 +163,19 @@ def needs_progress_prefetch(question) -> bool:
         return False
 
 
-def _prefetch_progress(question, out) -> str:
+def _prefetch_progress(question, out, cache=None) -> str:
     """조건이 맞으면 진행상황 표를 미리 조회해 대화에 붙일 문자열을 돌려준다.
 
     못 부르거나 결과가 없으면 **빈 문자열** — 조용히 넘어간다.
     호출 횟수(n_calls)를 올리지 않으므로 도구 6회 상한에 포함되지 않는다.
     다만 `out["tool_calls"]` 에는 남긴다 — 검문·추적선이 "근거를 확보했다" 를
     알아야 한다(안 남기면 FORCE_TOOL 되돌림이 헛돈다).
+
+    `cache` 를 주면 **루프의 캐시에 같은 키로 미리 넣어 둔다**(step55).
+    실측(step54 회귀 1회차): 선조회를 받고도 모델이 get_progress_table 을 한 번
+    더 불렀다. 캐시에 있으면 루프의 기존 "이미 같은 인자로 조회했다" 경로가
+    끊어 준다 — 새 차단 장치를 만들지 않고 있는 것을 쓴다.
+    키 모양은 `_run` 의 것과 **글자 그대로** 같아야 한다.
     """
     try:
         if not needs_progress_prefetch(question):
@@ -200,6 +206,10 @@ def _prefetch_progress(question, out) -> str:
             "summary": "진행상황 표 선조회 · " + _summary("get_progress_table", tool_out),
             "note": tool_out.get("note") or ""})
         out["waste"]["progress_prefetch"] = True
+        if cache is not None:
+            cache[("get_progress_table",
+                   json.dumps({"corp_name": corp}, ensure_ascii=False,
+                              sort_keys=True, default=str))] = tool_out
         return PROGRESS_PREFETCH + "\n\n" + _render("get_progress_table", tool_out)
     except Exception:                          # noqa: BLE001 — 선조회가 답을 막으면 안 된다
         traceback.print_exc(file=sys.stderr)
@@ -1398,11 +1408,11 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
     # 계약 확정 질문이면 진행상황 표를 먼저 조회해 첫 사용자 턴에 함께 넣는다.
     # 별도 user 메시지로 쪼개지 않는 이유 — user 가 연달아 두 번 오는 형태는
     # 이 API 에서 시험된 적이 없다. 한 턴 안에 넣으면 모양이 지금과 같다.
-    pre = _prefetch_progress(question, out)
+    cache: dict = {}
+    pre = _prefetch_progress(question, out, cache)
     user_content = str(question) + (("\n\n" + pre) if pre else "")
     msgs = [{"role": "system", "content": build_system(analysis)},
             {"role": "user", "content": user_content}]
-    cache: dict = {}
     n_calls = 0
     reminded = False           # 리마인더는 딱 한 번만 넣는다
     reviewed = False           # 도구 없이 답하는 경로의 검토도 딱 한 번만

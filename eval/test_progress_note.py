@@ -20,6 +20,7 @@
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -186,6 +187,19 @@ try:
     check("documents 에 청크가 들어간다", len(o["documents"]) == 1)
     check("sources 가 합쳐진다", o["sources"] == ["[HD현대일렉트릭 …]"])
     check("waste 플래그가 선다", o["waste"]["progress_prefetch"] is True)
+
+    # (d-2) 캐시에 같은 키로 심어 두어 두 번째 호출이 끊긴다 (step55)
+    _cache = {}
+    _called["n"] = 0
+    o = _fresh_out(["HD현대일렉트릭"])
+    L._prefetch_progress(Q, o, _cache)
+    _key = ("get_progress_table",
+            json.dumps({"corp_name": "HD현대일렉트릭"}, ensure_ascii=False,
+                       sort_keys=True, default=str))
+    check("캐시에 _run 과 같은 키로 들어간다", _key in _cache, str(list(_cache)))
+    check("캐시 값이 도구 결과 그대로", (_cache.get(_key) or {}).get("status") == "ok")
+    check("cache 를 안 주면 예외 없이 그대로 동작",
+          L._prefetch_progress(Q, _fresh_out(["HD현대일렉트릭"])).startswith("[선조회]"))
 
     # (e) 조건에 안 맞으면 회사가 있어도 안 부른다
     _called["n"] = 0
