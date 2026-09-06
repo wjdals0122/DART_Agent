@@ -6020,3 +6020,86 @@ top-5 밖으로 밀린다. 그래도 순증이라 지시대로 넣었다.
 - `report_type=annual` — 지시대로 안 건드렸다. `planner.txt` 39~42행에 이미
   "한 해 전체의 실적을 물으면 fiscal_year 와 함께 report_type='annual'" 이 있다
 - 검색기의 질의 확장 — planner 규칙만이다
+
+---
+
+## step48 — 제출물 초안 3종 + requirements 재현성 (2026-09-06)
+
+코드는 동결하고 문서만 만들었다. 숫자는 전부 기존 실측치에서 가져왔고
+각주로 출처 파일을 달았다.
+
+### [1] `README.md` — 전면 개편
+
+주최측 필수 요구 **"API End-point 주소를 README.md 에 명시"** 를 맨 위에 뒀다.
+
+```
+http://49.50.141.125
+GET /answer?question_id={id}&question={질문}
+GET /health
+```
+
+옛 README 는 파싱·임베딩 파이프라인 안내서였다(에이전트·API 가 없던 때 것).
+제출용으로 개편: 엔드포인트 → 개요 → 환경 구성 → `.env` → 데이터 준비 →
+서버 실행(systemd unit 포함) → 디렉터리 구조 → 검증 명령.
+
+적은 명령은 **전부 실제로 있는지 확인했다** (`src.search.bm25_build` ·
+`src.search.build_latest_mask` · `src.index.*` 의 `__main__` 유무,
+`scripts/preflight.py` · `eval/ask.py` · `scripts/run_embed.sh` 파일 존재).
+
+systemd unit 은 **재현용으로 새로 적은 것**이라고 명시했다 — 서버에서 도는
+`dis044.service` 원본은 리포에 없다. 지어낸 것으로 오해되면 안 된다.
+
+### [2] `docs/API.md` — API 명세
+
+5필드 스키마·`/health` 3상태·오류 시 동작 6가지·시간 층위·한글 인코딩·운영 메모.
+
+**실제 요청/응답 전문을 실호출로 받아 넣었다** (2026-09-06 09:44, 살아 있는
+엔드포인트에 1회):
+
+```
+HTTP 200 · 12,511 bytes · 8.9초
+question_id 5자 · question 25자 · retrieved_context 6,441자 ·
+think_trace 431자 · answer 107자
+answer: "SK하이닉스의 2024년 연결 매출액은 66,192,960백만원입니다."
+/health: {"status":"ok","warm_seconds":8.7,"served":11,"uptime":116737.9}
+```
+
+**서버가 무중단 32.4시간(116,737초) 살아 있다.** `GET /` 응답이
+`{"service":"공시 Agent 평가 API",...}` 이므로 **순수 ASGI 껍데기**가 떠 있다 —
+한글을 깨뜨리는 FastAPI 경로가 아니다(HANDOFF §15 의 구분법).
+
+### [3] `docs/proposal.md` — 기술 제안서 7장
+
+1 문제 정의 · 2 데이터 처리 · 3 검색 · 4 에이전트 · 5 서비스 · 6 평가 결과 ·
+7 한계와 개선 방향. 각주 15개로 숫자마다 출처 파일을 달았다.
+
+**측정하지 않은 것은 적지 않았고, 측정했으나 나빴던 것도 그대로 적었다:**
+w_section 미채택(recall@5 0.361 → 0.306), 검문 7 과다 발동으로 비용 36% 증가 후
+비활성화, v6 정답률 25%→22.5% 하락과 원인 4개, ki 되돌림으로 [33]을 잃은
+트레이드오프, 질의 확장의 나빠진 3개사.
+
+7장은 지시가 "각 항목에 '잔여 기간 내 회귀 검증 불가로 채택하지 않음' 명시"
+였으나 **항목마다 사실이 달라 그대로 쓰지 않았다.**
+- 7.1 문서당 상한 → step47 에서 **채택(수정 완료)**. 회귀 7/7 검증됨
+- 7.2 매출액↔영업수익 → planner 규칙만 **부분 채택**. 검색기 확장은 미채택
+- 7.3 계열로 계약 정정 추적 · 7.4 하위 질문 분할 → **채택하지 않음**(지시대로 명시)
+
+### [4] `requirements.txt` — 빠진 것을 찾았다
+
+**`pandas` 가 빠져 있었다.** `src/search/hybrid.py` 와 `src/agent/context.py` 가
+런타임에 쓰는데, 지금까지는 FlagEmbedding 이 끌고 오는 `datasets` 의 의존성으로
+**우연히** 깔려 있었다. 명시하지 않으면 다른 곳에서 재현이 깨진다.
+
+찾은 방법: `src/` 전체를 AST 로 훑어 서드파티 import 21개를 뽑고 requirements 와
+대조했다. `psutil` 도 빠져 있었으나 `bm25_build.py` 의 함수 안 import(색인 빌드
+전용, 메모리 로그)라 주석으로만 적었다. 나머지는 전부 이미 있다.
+
+**서버 `pip freeze` 대조는 못 했다.** `ssh -o BatchMode=yes` 가
+`Permission denied (publickey,password)` — 비밀번호 인증이라 자동화할 수 없다.
+대신 실행 환경(anaconda base)의 설치 버전을 확인해 적었다: pandas 2.3.0 ·
+numpy 1.26.0 · scipy 1.13.1 · pyarrow 25.0.1 · FlagEmbedding 1.4.2 ·
+kiwipiepy 0.23.2 · uvicorn 0.40.0 · torch 2.7.1+cu118 · **fastapi 없음**(의도대로).
+
+### 수치
+
+LLM 호출 **3회**(문서에 넣을 실호출 예시 1건, 서버 쪽 집계) · 회귀·e2e 미실행.

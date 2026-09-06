@@ -1,118 +1,303 @@
-# dis-044 — 공시 RAG 파이프라인
+# dis-044 — DART 공시 질의응답 Agent
 
-AI Festival 2026 · 팀인천
-
-DART 원문(XML/PDF) → **파싱·정규화 → 청킹 → bge-m3 임베딩 → 검색 평가**까지 한 레포에서 재현한다.
+제10회 미래에셋증권 AI Festival · 팀 인천
 
 ---
 
-## Quick Start
+## API End-point
+
+```
+http://49.50.141.125
+```
+
+| 경로 | 용도 |
+|---|---|
+| `GET http://49.50.141.125/answer?question_id={id}&question={질문}` | 질의응답 (JSON 5필드) |
+| `GET http://49.50.141.125/health` | 헬스체크 |
+
+호출 예시 (한글은 URL 인코딩):
+
+```bash
+curl -s -G "http://49.50.141.125/answer" \
+  --data-urlencode "question_id=Q-001" \
+  --data-urlencode "question=SK하이닉스 2024년 연결 매출액이 얼마야?"
+
+curl -s "http://49.50.141.125/health"
+# {"status":"ok","warm_seconds":8.7,"served":11,"uptime":116737.9}
+```
+
+실측(2026-09-06 09:44): HTTP 200 · 12,511 bytes · **8.9초**.
+자세한 규격·필드 설명·오류 시 동작은 **[docs/API.md](docs/API.md)**.
+
+---
+
+## 프로젝트 개요
+
+DART 공시 코퍼스(**70개사 · 4,204문서 · 2023.01~2026.03**)에 대해 자연어 질문을
+받아 근거와 함께 답하는 Agent다. 원문 XML/PDF를 파싱·정규화해 **614,578청크**로
+자르고 bge-m3로 임베딩한 뒤, BM25와 dense를 RRF로 융합한 하이브리드 검색기 위에
+HyperCLOVA X(HCX-005) function calling 에이전트를 올렸다.
+
+외부 데이터를 쓰지 않는다(뉴스·리포트·위키·OpenDART 실시간 호출 없음).
+LLM은 과제 제약에 따라 HyperCLOVA X만 쓰고, 임베딩은 로컬 GPU에서 돌린다.
+정정공시는 기본적으로 최신본만 검색 대상이 되도록 마스킹한다.
+
+설계 근거와 평가 결과는 **[docs/proposal.md](docs/proposal.md)**,
+단계별 작업 기록은 [docs/WORKLOG.md](docs/WORKLOG.md)에 있다.
+
+---
+
+## 환경 구성
+
+| 항목 | 값 |
+|---|---|
+| Python | **3.12** |
+| 운영 서버 | Ubuntu · 4 vCPU · 16GB RAM · GPU 없음 (CPU 폴백으로 동작) |
+| 개발/색인 | RTX 4090 24GB × 4 · Xeon Gold 6326 · RAM 384GB |
 
 ```bash
 python -m venv venv
-venv\Scripts\activate          # Windows
+source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-# torch는 CUDA 버전에 맞춰 별도 설치 (requirements.txt 주석 참고)
+```
 
-cp scripts/config.example.json scripts/config.json   # 경로·옵션
+**torch는 별도 설치한다.** CUDA 버전에 맞춰야 한다.
 
-# 1) 파싱 → 청킹
-python scripts/00_freeze_baseline.py       # 회귀 기준선 동결
-python scripts/03_build_docjson.py         # XML → doc.json
-python scripts/05_build_doc_index.py       # 문서 메타 인덱스
-python scripts/05b_build_md_index.py       # md 파일 메타 인덱스
-python scripts/06_build_chunks.py --jobs 10   # → data/processed/chunks.jsonl.gz
-python scripts/07_coverage.py              # 본문 손실 검증
-python scripts/99_validate.py --all        # 검증 골든셋
+```bash
+# 색인·임베딩 환경 (이 레포를 돌린 버전: 2.7.1+cu118)
+pip install torch --index-url https://download.pytorch.org/whl/cu118
+# GPU 없는 서버
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+```
 
-# 2) 임베딩 (GPU 4장)
-python -m src.index.embed_prepare
-bash scripts/run_embed.sh --max-length 1024 --batch-tokens 16384
-python -m src.index.embed_merge && python -m src.index.verify_vectors
+시스템 패키지: 별도로 필요한 것은 없다. `kiwipiepy`(한국어 형태소 분석기)가
+휠로 설치되며 컴파일러를 요구하지 않는다.
 
-# 3) 검색 확인
-python -m src.eval.chunk_store --build     # 1회
-python -m src.eval.ask                     # 대화형
+### 하지 말 것
+
+- **`pip install -U` 금지.** torch/FlagEmbedding 버전에 bge-m3 벡터가 묶여 있다.
+- **`fastapi` 를 설치하지 않는다.** pydantic 2.8.2 → 2.13.5 를 함께 올려 임베딩
+  환경을 흔든다. API 서버는 uvicorn만으로 도는 순수 ASGI다.
+
+### 임베딩 모델 캐시
+
+기동할 때 `huggingface.co` 를 확인하러 간다. 서버에는 캐시(4.3GB)를 미리 받아 두고
+`HF_HUB_OFFLINE=1` 로 띄운다. `src/search/hf_cache.ensure_offline()` 이 캐시를
+확인하고, 없으면 조용히 멈추지 않고 경로와 조치를 적고 종료한다.
+
+```bash
+python -c "from huggingface_hub import snapshot_download; snapshot_download('BAAI/bge-m3')"
 ```
 
 ---
 
-## 주요 명령어
+## 환경변수 (`.env`)
 
-| 용도 | 명령어 |
-|------|--------|
-| 파싱 → doc.json | `python scripts/03_build_docjson.py` |
-| md 파일 메타 인덱스 | `python scripts/05b_build_md_index.py` |
-| 청킹 | `python scripts/06_build_chunks.py --jobs 10` |
-| 손실·환각 검증 | `python scripts/07_coverage.py` / `python scripts/99_validate.py --all` |
-| 임베딩 (4 GPU) | `bash scripts/run_embed.sh --max-length 1024 --batch-tokens 16384` |
-| 인덱스 검증 | `python -m src.index.verify_vectors` |
-| 단건 질의 | `python -m src.eval.ask "삼성전자의 주주환원 정책은?"` |
-| 팀 배포본 만들기 | `python scripts/10_package_index.py --out dist` |
-| 질문 세트 일괄 | `python -m src.eval.run_eval -k 5` |
-| 설정 그리드 비교 | `python -m src.eval.sweep` |
+리포 루트에 `.env` 를 둔다. **키 값은 이 저장소 어디에도 없다.**
 
----
+```ini
+CLOVA_API_KEY=발급받은_키를_여기에
+# 아래는 선택 — 없으면 기본값을 쓴다
+CLOVA_MODEL=HCX-005
+CLOVA_API_HOST=https://clovastudio.stream.ntruss.com
+```
 
-## 구조
-
-- **corpus/** — DART 원문(읽기 전용, 미추적). `manifest.jsonl`이 문서 목록
-- **baseline/** — 0단계 회귀 기준선의 **해시**. 기준선이 이 기계에만 있으면 기준선이 아니다
-- **config/** — `exception_policy.yaml` (무엇을 예외로 잡을지)
-- **scripts/** — `00`~`07` 단계 실행기, `99_validate.py` 검증 골든셋, `run_embed.sh`
-- **src/normalize/**, **src/extract/**, **src/render/** — 파싱 공통층 (인코딩·표·기간·재무)
-- **src/chunk/** — 자족 청크 생성
-- **src/index/** — bge-m3 임베딩 (`embed_prepare` → `embed_worker` → `embed_merge` → `verify_vectors`)
-- **src/eval/** — dense+sparse 검색, 질문 세트 채점 (`ask`, `retriever`, `run_eval`, `sweep`)
-- **parser/** — 이관 전 원본 파서 4종. 대조용 참고 원본
-- **data/** — 파생 산출물 전부 (미추적, 아래 참고)
-- **reports/** — 검증 CSV·MD
-- **docs/** — 예외 매트릭스, 청킹·임베딩·검색 실측 노트
+| 변수 | 기본값 | 설명 |
+|---|---|---|
+| `CLOVA_API_KEY` | (필수) | HyperCLOVA X API 키. 없으면 호출 전에 사유를 반환한다 |
+| `CLOVA_MODEL` | `HCX-005` | 모델 id |
+| `CLOVA_API_HOST` | CLOVA Studio | API 호스트 |
+| `PORT` | `80` | API 서버 포트 |
+| `FORCE_CPU` | (없음) | `1` 이면 GPU가 있어도 CPU로 돈다. 서버 재현용 |
+| `HF_HUB_OFFLINE` | (없음) | `1` 이면 HF 네트워크를 아예 안 친다. 서버 기동 시 설정 |
+| `DART_API_FASTAPI` | (없음) | `1` 일 때만 FastAPI 껍데기를 쓴다. **평소 쓰지 않는다** |
 
 ---
 
-## 데이터 (전부 git 미추적)
+## 데이터 준비
+
+`data/` · `corpus/` 는 git에 없다(용량). 아래 순서로 만든다.
+
+```bash
+# 0) 원문 파싱 → 청킹
+python scripts/03_build_docjson.py            # XML → doc.json
+python scripts/05_build_doc_index.py          # 문서 메타 인덱스
+python scripts/05b_build_md_index.py          # md 메타 인덱스
+python scripts/06_build_chunks.py --jobs 10   # → data/processed/chunks.jsonl.gz
+python scripts/07_coverage.py                 # 본문 손실 검증
+python scripts/99_validate.py --all           # 검증 골든셋
+
+# 1) 임베딩 (GPU 4장, bge-m3)
+python -m src.index.embed_prepare
+bash scripts/run_embed.sh --max-length 1024 --batch-tokens 16384
+python -m src.index.embed_merge
+python -m src.index.verify_vectors            # 행 수·shape 계약 검증
+
+# 2) 검색 인덱스
+python -m src.search.bm25_build               # BM25 (scipy CSC 자체 구현)
+python -m src.search.build_latest_mask        # 정정본 마스크 latest_mask.npz
+python -m src.eval.chunk_store --build        # 원문 seek 오프셋 (1회)
+
+# 3) 확인
+python scripts/preflight.py                   # 기동 전 점검(1초, 인덱스 안 올림)
+python eval/ask.py "SK하이닉스 2024년 연결 매출액이 얼마야?"
+```
+
+산출물 (전부 git 미추적):
 
 | 경로 | 크기 | 내용 |
-|------|------|------|
-| `data/index/vectors/` | 6.5GB | `dense.f32.npy` (614,693×1024) · `sparse.npz` · `id_map.parquet` · `_work/` 샤드 |
-| `data/processed/chunks_by_10_companies/` | 3.0GB | 임베딩 **입력** 청크 8개 (70개사, 617,380줄 → 대체본 2,802 제외 = 614,578) |
-| `corpus/corrections/` | 5.7MB | 정정 위치 마킹 md 5개. pdf+html 문서의 유일한 파싱 결과다 |
-| `data/processed/_archive/` | 282MB | 위 청크의 배포 zip |
-| `data/processed/chunks.jsonl.gz` | 272MB | 이 레포 `06_build_chunks.py` 자체 청킹 산출물 |
-| `data/interim/`, `data/baseline_md/` | ~1.1GB | doc.json, 기준선 md |
+|---|---|---|
+| `data/index/vectors/dense.f32.npy` | 2.5GB | 614,578 × 1024 fp32 |
+| `data/index/vectors/id_map.parquet` | 6.9MB | 행↔청크 매핑 (행 순서 계약의 기준) |
+| `data/index/vectors/sparse.npz` | 338MB | bge-m3 lexical |
+| `data/index/bm25/` | — | scipy CSC 색인 |
+| `data/index/latest_mask.npz` | — | 정정본 마스킹 |
+| `data/processed/chunks.jsonl.gz` | 272MB | 청크 원문 |
 
-> **주의 — 두 청킹 결과는 다른 코퍼스다.** 지금 있는 벡터는 배포본(`chunks_by_10_companies/`,
-> 70개사 614,693청크)으로 만든 것이고, 이 레포의 `06_build_chunks.py`가 만드는
-> `chunks.jsonl.gz`는 별개다. 후자로 다시 임베딩하려면 `DART_CHUNKS_DIR`로 입력을 갈아끼운다.
-
----
-
-## 기술
-
-- Python 3.12
-- 파싱: lxml, 자체 정규화층 (`src/normalize/`)
-- 임베딩: **BAAI/bge-m3** (1024차원 dense + 250,002 lexical sparse), GPU 4장 병렬
-- 검색: dense 코사인 + sparse 내적, 기본 가중 1:1
-- 저장: numpy memmap + scipy CSR + parquet id_map (벡터 DB 없음)
+> **행 순서 계약** — `chunks.jsonl` 행 = `dense.f32.npy` 행 = `id_map.parquet` 행 =
+> BM25 행. 어느 단계에서도 정렬·재배치하지 않는다. 행 수가 하나라도 다르면
+> `verify_vectors` 가 멈춘다.
 
 ---
 
-## 더 읽을 것
+## 서버 실행
 
-- [docs/embedding_notes.md](docs/embedding_notes.md) — 임베딩 재실행 방법, 산출물 계약, 입력 필드 매핑
-- [docs/retrieval_eval_notes.md](docs/retrieval_eval_notes.md) — 40문항 실측, 실패 사례, GPU 온도 관리
-- [docs/chunking_notes.md](docs/chunking_notes.md) — 이 레포의 청킹 규칙
-- [docs/chunking_by_10_companies.md](docs/chunking_by_10_companies.md) — 배포본 청킹 결과(현 벡터의 입력)
-- [docs/exception_matrix.md](docs/exception_matrix.md) — 원문 예외 유형과 조치
-- [docs/document_index.md](docs/document_index.md) — 문서 메타 인덱스 스펙
-- **[docs/pitfalls.md](docs/pitfalls.md) — 주의사항. 레포를 만지기 전에 읽는다**
-- [docs/md_index.md](docs/md_index.md) — md 파일 메타 인덱스 + **청킹하는 사람을 위한 임베딩 입력 계약**
+### systemd (운영)
+
+운영 서버는 systemd가 관리한다. `serve.sh` 를 직접 부르면 80 포트 충돌이 난다.
+
+```ini
+# /etc/systemd/system/dis044.service
+[Unit]
+Description=dis-044 공시 Agent 평가 API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/dis-044
+EnvironmentFile=/root/dis-044/.env
+Environment=HF_HUB_OFFLINE=1
+Environment=PORT=80
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/root/dis-044/venv/bin/python -m src.api.server --host 0.0.0.0 --port 80
+Restart=always
+RestartSec=5
+StandardOutput=append:/root/dis-044/logs/api.log
+StandardError=append:/root/dis-044/logs/api.log
+
+[Install]
+WantedBy=multi-user.target
+```
+
+> 위 unit은 현재 서버 설정(작업 경로 `/root/dis-044`, 80 포트, `HF_HUB_OFFLINE=1`,
+> 로그 `logs/api.log`)에 맞춘 **재현용 파일**이다. 서버에서 실제로 돌고 있는
+> `dis044.service` 원본은 이 저장소에 포함돼 있지 않다.
+
+```bash
+systemctl daemon-reload
+systemctl enable --now dis044
+systemctl status dis044
+journalctl -u dis044 -n 40 --no-pager
+```
+
+### 배포
+
+```bash
+bash scripts/deploy.sh            # 코드 tar → scp → systemctl restart → /health 폴링
+bash scripts/deploy.sh --no-restart
+```
+
+코드·설정·프롬프트만 보낸다(`src config prompts eval scripts serve.sh requirements.txt`).
+`data/` `corpus/` `.env` 는 서버 것을 그대로 둔다.
+
+### systemd 없는 환경 (로컬 시험)
+
+```bash
+PORT=8080 bash serve.sh          # nohup 기동 · logs/api.log
+bash serve.sh status
+bash serve.sh stop
+# 또는
+python -m src.api.server --host 0.0.0.0 --port 8080
+```
+
+`serve.sh` 는 중복 기동 차단 · `HF_HUB_OFFLINE=1` · 프록시 환경변수 비우기를 한다
+(프록시가 잡히면 HF가 TLS 검증에 실패해 모델 초기화에서 죽는다).
 
 ---
 
-*Internal research use.*
+## 디렉터리 구조
 
+```
+dis-044/
+├── README.md                  이 파일 (API 엔드포인트)
+├── CLAUDE.md                  작업 상시 규칙
+├── requirements.txt
+├── serve.sh                   API 기동 (systemd 없는 환경용)
+│
+├── src/
+│   ├── api/server.py          평가용 API. /answer · /health. 순수 ASGI
+│   ├── agent/
+│   │   ├── loop.py            에이전트 루프 (도구 6회 한도 · 검문 · 후처리)
+│   │   ├── clova.py           HyperCLOVA X 호출 (function calling · 429 백오프)
+│   │   ├── rewrite.py         질문 재작성 (회사·연도·하위질문 추출)
+│   │   ├── context.py         <document> 조립 · 기수→연도 · 단위 경고
+│   │   └── usage.py           토큰·비용 회계
+│   ├── tools/                 도구 구현 (예외를 던지지 않고 status JSON 반환)
+│   ├── search/
+│   │   ├── hybrid.py          하이브리드 검색기 (하드필터 → BM25+dense RRF)
+│   │   ├── bm25.py/bm25_build.py   scipy CSC 자체 구현
+│   │   ├── build_latest_mask.py    정정본 마스킹
+│   │   ├── aliases.py         회사명·별칭 해석
+│   │   └── tokenize_ko.py     kiwipiepy 토크나이저
+│   ├── index/                 bge-m3 임베딩 (prepare→worker→merge→verify)
+│   ├── chunk/ extract/ normalize/ render/    파싱·정규화·청킹
+│   └── eval/                  chunk_store · gpu_guard · 검색 평가
+│
+├── prompts/                   시스템·planner 프롬프트 (형식 규칙은 코드에 있다)
+├── config/
+│   ├── tools.json             function calling 도구 정의 5개
+│   └── aliases.yaml           회사 별칭
+│
+├── eval/
+│   ├── ask.py                 단건 질의
+│   ├── regression.py          회귀 확인 7문항 (정답 확정)
+│   ├── run_eval.py            골든셋 검색 채점 (recall/hit@k)
+│   ├── run_e2e.py             40문항 e2e
+│   ├── golden.jsonl           검색 골든셋 라벨
+│   └── test_*.py              LLM 0회 검증 15종
+│
+├── scripts/                   00~11 파이프라인 · deploy.sh · preflight.py
+├── docs/
+│   ├── API.md                 API 명세
+│   ├── proposal.md            기술 제안서
+│   ├── WORKLOG.md             단계별 작업 기록(누적)
+│   └── step6_review.md        주제별 정리
+├── reports/                   실측 리포트 (평가·검색·조사)
+│
+├── corpus/manifest.jsonl      문서 목록 4,204건 (원문은 미추적)
+└── data/                      파생 산출물 전부 (미추적)
+```
 
-## 정리 링크
-https://claude.ai/code/artifact/b8044591-c80f-417c-b2c0-ed7522cfffc3
+---
+
+## 검증 명령
+
+```bash
+# LLM 0회 — 전부 무료
+python eval/test_api.py        # API 계약 (503→200 · 예외에도 200 · 한글 왕복)
+python eval/test_loop.py       # 루프가 어떤 경우에도 규격 dict 를 내는지
+python eval/test_tools.py      # 도구가 예외를 안 던지는지
+python eval/test_context.py    # <document> 조립 · 정정 경고
+python eval/run_eval.py        # 골든셋 검색 채점
+
+# LLM 사용
+python eval/regression.py      # 회귀 7문항 (약 180원 · 2분)
+python eval/run_e2e.py --n 40 --yes --max-cost 3000
+python eval/token_log.py --summary
+```
+
+---
+
+*제10회 미래에셋증권 AI Festival 제출용. Internal research use.*
