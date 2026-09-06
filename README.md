@@ -106,11 +106,15 @@ pip install -r requirements-server.txt
 | `uvicorn` | 0.52.4 | 0.40.0 |
 | `fastapi` | 0.141.1 (설치돼 있으나 **쓰이지 않는다** — 아래 참고) | 미설치 |
 
-서버 `pip freeze` 전체는 82개 패키지다. 위 17개가 이 프로젝트가 **직접
-import** 하는 것이고(`src/` AST 대조 + `parser/`·`scripts/`의 `lxml`),
-나머지는 이들이 끌고 오는 의존성이다(`transformers` 5.16.1 ·
-`sentence-transformers` 6.0.1 · `datasets` 5.0.1 · `pydantic` 2.13.5 등).
-`requirements-server.txt` 에는 **위 17개만** 고정했다.
+서버 `pip freeze` 전체는 82개 패키지다.
+`requirements-server.txt` 에는 이 프로젝트가 직접 쓰는 **15개만** 고정했다 —
+`numpy` `scipy` `pandas` `pyarrow` `FlagEmbedding` `kiwipiepy` `kiwipiepy_model`
+`lxml` `PyYAML` `orjson` `python-dotenv` `requests` `psutil` `uvicorn` `torch`.
+
+나머지는 이들이 끌고 오는 의존성이라 넣지 않았다(`transformers` 5.16.1 ·
+`sentence-transformers` 6.0.1 · `datasets` 5.0.1 · `huggingface_hub` 1.29.0 ·
+`pydantic` 2.13.5 · `starlette` 1.6.0 등). 전부 박으면 다른 파이썬 버전에서
+설치가 깨진다. `fastapi` 도 넣지 않았다 — 서버에 깔려 있지만 쓰이지 않는다.
 
 > **개발 PC와 서버의 버전이 다르다.** 특히 `pandas`(2.3.0 ↔ 3.0.5) ·
 > `scipy`(1.13.1 ↔ 1.17.1) · `torch`(CUDA ↔ CPU)가 메이저/마이너로 갈린다.
