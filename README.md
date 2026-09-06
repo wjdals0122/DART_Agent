@@ -252,12 +252,19 @@ dis-044/
 │   │   ├── aliases.py         회사명·별칭 해석
 │   │   └── tokenize_ko.py     kiwipiepy 토크나이저
 │   ├── index/                 bge-m3 임베딩 (prepare→worker→merge→verify)
-│   ├── chunk/ extract/ normalize/ render/    파싱·정규화·청킹
+│   ├── normalize/             관대한 트리 빌더 · 인코딩 · 표 라우팅 · 헤더
+│   ├── extract/               재무·기간·정정·항목코드 추출
+│   ├── render/                마크다운 렌더링 (표 헤더 반복)
+│   ├── chunk/                 자족 청크 생성
 │   └── eval/                  chunk_store · gpu_guard · 검색 평가
+│
+├── parser/                    이관 전 원본 파서 4종 + PARSING_NOTES.md (대조용)
+├── pdf_parser/                pdf+html 문서 경로
 │
 ├── prompts/                   시스템·planner 프롬프트 (형식 규칙은 코드에 있다)
 ├── config/
 │   ├── tools.json             function calling 도구 정의 5개
+│   ├── exception_policy.yaml  파싱 예외 정책 15개 (E1~E8 + SWALLOW)
 │   └── aliases.yaml           회사 별칭
 │
 ├── eval/
