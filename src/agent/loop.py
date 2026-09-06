@@ -335,6 +335,59 @@ def strip_placeholders(text: str) -> str:
         traceback.print_exc(file=sys.stderr)
         return text or ""
 
+
+# ---------------------------------------------- 단위 환산 괄호 검증 (step64)
+#
+# 【실측】 v6 [9] 두산로보틱스 "30,000백만원(30억원)" — 실제 300억. 결론이
+# 정반대가 됐다. 오늘 실호출 "780,000백만원 → 78억" — 100배 오류.
+# 모델이 백만원 값을 괄호에 억원으로 옮기며 환산을 틀린다.
+#
+# 【step60 재발 방지 — 문장을 지우지 않는다】
+# step60 에서 문장 분할 정규식 결함(소수점)으로 답변 앞부분이 통째로 잘렸다.
+# 이번 수정은 문장 경계를 아예 판정하지 않는다. 정규식이 "숫자+단위(숫자+단위)"
+# 를 통째로 잡고, 틀렸으면 **여는 괄호부터 닫는 괄호까지만** 떼어낸다.
+# 괄호 안에 숫자+단위 외의 것(예: '약', 중첩 괄호)이 있으면 애초에 매치되지 않는다.
+# 값을 고치려 들지 않는다 — 어느 쪽이 맞는지 후처리는 알 수 없다.
+_UNIT_FACTOR = {"천원": 1e3, "백만원": 1e6, "억원": 1e8, "십억원": 1e9}
+# '십억원' 이 '억원' 을 품으므로 긴 것을 먼저 대안에 놓는다
+_UNIT_PAREN = re.compile(
+    r"(?P<head>(?P<n1>\d[\d,]*(?:\.\d+)?)\s*(?P<u1>십억원|백만원|억원|천원))"
+    r"\s*\((?P<n2>\d[\d,]*(?:\.\d+)?)\s*(?P<u2>십억원|백만원|억원|천원)\)")
+
+
+def strip_bad_unit_paren(text: str):
+    """(고친 본문, 뗀 괄호 수). 환산이 틀린 "N백만원(M억원)" 류의 괄호만 뗀다.
+
+    - 쉼표가 든 숫자(30,000)는 하나의 수로 읽는다
+    - 반올림 오차 1% 이내는 통과
+    - 같은 단위끼리의 괄호(재진술·범위 등)는 판정하지 않는다
+    - 예외를 던지지 않는다
+    """
+    n = 0
+
+    def _repl(m):
+        nonlocal n
+        try:
+            if m.group("u1") == m.group("u2"):
+                return m.group(0)              # 환산이 아니다 — 건드리지 않는다
+            a = float(m.group("n1").replace(",", "")) * _UNIT_FACTOR[m.group("u1")]
+            b = float(m.group("n2").replace(",", "")) * _UNIT_FACTOR[m.group("u2")]
+            if max(abs(a), abs(b)) == 0:
+                return m.group(0)
+            if abs(a - b) <= 0.01 * max(abs(a), abs(b)):
+                return m.group(0)              # 1% 이내 — 반올림으로 본다
+            n += 1
+            return m.group("head")             # 괄호만 뗀다. 값은 안 고친다
+        except Exception:                      # noqa: BLE001
+            return m.group(0)
+
+    try:
+        return _UNIT_PAREN.sub(_repl, text or ""), n
+    except Exception:                          # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        return text or "", 0
+
+
 AUDIT_CALC = (
     "답변에 비율·배수 표현이 있으나 calculate 를 사용하지 않았다. "
     "calculate 로 값을 구한 뒤 답변을 다시 작성하라."
@@ -1232,7 +1285,9 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
                      "contrast_stripped": False,
                      # 계약 확정 질문에서 진행상황 표를 선조회했나 (step54).
                      # 도구 6회 상한에는 포함되지 않는 호출이다
-                     "progress_prefetch": False},
+                     "progress_prefetch": False,
+                     # 환산이 틀린 단위 괄호("30,000백만원(30억원)")를 몇 개 뗐나 (step64)
+                     "unit_paren_stripped": 0},
            # 질문 재작성 단계의 결과. _rewrite_step 이 채운다 — 그 전에 죽어도
            # 키는 있어야 서버 trace 가 "생략" 을 적을 수 있다
            "rewrite": {"ok": False, "note": "실행 안 됨", "analysis": None,
@@ -1298,6 +1353,18 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
     except Exception as e:                     # noqa: BLE001
         traceback.print_exc(file=sys.stderr)
         out["note"] = (out.get("note") or "") + f" · 자리표시자 제거 실패: {e}"
+    # 환산이 틀린 단위 괄호 제거(step64) — "30,000백만원(30억원)" 류.
+    # 문장 경계를 판정하지 않고 괄호 짝 안만 뗀다(step60 재발 방지).
+    try:
+        _b = out["answer"]
+        cleaned, n_up = strip_bad_unit_paren(out["answer"])
+        if n_up:
+            out["waste"]["unit_paren_stripped"] = n_up
+            out["answer"] = cleaned
+        _note_pp("strip_bad_unit_paren", _b)
+    except Exception as e:                     # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        out["note"] = (out.get("note") or "") + f" · 단위 괄호 검증 실패: {e}"
     # 근거 절은 모델이 아니라 여기서 만든다. 형식이 흔들리면 안 된다.
     #
     # 【retrieved 를 따로 붙드는 이유 — 2026-09-03】
