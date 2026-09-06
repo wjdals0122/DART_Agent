@@ -143,6 +143,45 @@ check("목록형·산문형이 함께 있어도 한 번만", final2.count("근�
 
 print()
 print("=" * 74)
+print("3개년 제시 형식 (step59) — 후처리가 지우지 않는지")
+print("=" * 74)
+
+from src.agent import loop as _L  # noqa: E402
+
+THREE = """SK하이닉스의 연결 매출액입니다.
+- 2025년(제77기) 66,192,960백만원
+- 2024년(제76기) 32,765,719백만원
+- 2023년(제75기) 44,621,568백만원
+
+질문에 연도가 없어 최근 3개 사업연도를 함께 제시했습니다. 특정 연도를 원하시면 알려주시면 그 기준으로 답변드리겠습니다."""
+
+_kept = _L.strip_boilerplate(THREE)
+check("strip_boilerplate 가 '알려주시면' 을 지우지 않는다", "알려주시면" in _kept)
+check("strip_boilerplate 가 '답변드리겠습니다' 를 지우지 않는다",
+      "답변드리겠습니다" in _kept)
+check("3개년 목록 세 줄이 그대로", _kept.count("년(제") == 3, _kept[:120])
+check("strip_leadin 이 첫 줄을 지우지 않는다",
+      "연결 매출액입니다" in _L.strip_leadin(THREE), _L.strip_leadin(THREE)[:60])
+check("실제 값이면 자리표시자로 안 잡힌다",
+      _L.strip_placeholders(THREE).count("년(제") == 3)
+
+# 예시를 그대로 베끼면 걷어낸다
+COPIED = """ㅇㅇ전자의 연결 매출액입니다.
+- 2025년(제NN기) 000,000,000백만원
+- 2024년(제NN기) 000,000,000백만원
+
+근거
+- [○○기업 사업보고서 (2024.12), 2025-03-11, 접수번호 20250311XXXXXX]"""
+check("예시를 베낀 '제NN기' 문단은 제거된다",
+      "제NN기" not in _L.strip_placeholders(COPIED),
+      _L.strip_placeholders(COPIED)[:120])
+check("'000,000,000' 도 제거된다",
+      "000,000,000" not in _L.strip_placeholders(COPIED))
+check("PLACEHOLDERS 에 두 자리표시자가 있다",
+      "제NN기" in _L.PLACEHOLDERS and "000,000,000" in _L.PLACEHOLDERS)
+
+print()
+print("=" * 74)
 if FAIL:
     print(f"{len(FAIL)}건 실패: " + ", ".join(FAIL))
     sys.exit(1)
