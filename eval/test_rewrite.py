@@ -608,6 +608,74 @@ check("rel_year 는 LLM 주입이 안 된다(_DEFAULTS 밖)",
 
 print()
 print("=" * 74)
+print("5-I — 환산됐으면 rewritten 도 맞춘다 (step67)")
+print("=" * 74)
+
+_now66 = __import__("datetime").datetime.now().year
+
+
+def _run66(q, rewritten, years, subs=None, time_note="직전 회계연도 2023으로 해석"):
+    payload = json.dumps({"rewritten": rewritten,
+                          "sub_questions": subs or [rewritten],
+                          "companies": ["삼성전자"], "fiscal_years": years,
+                          "ki": [], "doc_groups": [], "time_note": time_note,
+                          "out_of_scope": False}, ensure_ascii=False)
+    fake66, _ = make_chat({"ok": True, "text": payload, "tool_calls": [], "usage": {}})
+    clova.chat = fake66
+    try:
+        return R.rewrite_question(q)["analysis"]
+    finally:
+        clova.chat = real_chat
+
+
+# (a) rewritten 에 틀린 연도 하나 → 환산 결과로 치환
+_a66 = _run66("삼성전자 작년 영업이익",
+              "삼성전자의 2023년도 영업이익은 얼마입니까?", [2023])
+check("연도 1개 → 환산 결과로 치환",
+      _a66["rewritten"] == f"삼성전자의 {_now66 - 1}년도 영업이익은 얼마입니까?",
+      _a66["rewritten"])
+check("하위 질문도 같이 치환", str(_now66 - 1) in _a66["sub_questions"][0])
+check("fiscal_years 도 환산 결과", _a66["fiscal_years"] == [_now66 - 1])
+check("모델의 time_note 는 지워진다(코드 환산이 우선)", _a66["time_note"] == "")
+_blk66 = R.analysis_block(_a66)
+check("블록의 재작성 줄이 환산 연도를 말한다",
+      f"- 재작성: 삼성전자의 {_now66 - 1}년도" in _blk66
+      and "2023년도" not in _blk66, _blk66[:150])
+
+# (b) rewritten 에 연도 없음 → 그대로
+_a66 = _run66("삼성전자 작년 영업이익", "삼성전자의 직전 회계연도 영업이익은?", [2024])
+check("연도 없음 → rewritten 그대로",
+      _a66["rewritten"] == "삼성전자의 직전 회계연도 영업이익은?")
+
+# (c) 연도 둘 이상 → 치환 안 함, 블록에서 rewritten 줄 제거
+_a66 = _run66("삼성전자 작년 실적 비교", "삼성전자의 2023년과 2024년 실적 비교",
+              [2023, 2024], subs=["2023년 실적은?", "2024년 실적은?"])
+check("여러 연도 → 텍스트는 치환하지 않는다",
+      _a66["rewritten"] == "삼성전자의 2023년과 2024년 실적 비교")
+check("여러 연도 → hide_rewritten", _a66.get("hide_rewritten") is True)
+_blk66 = R.analysis_block(_a66)
+check("블록에서 재작성·하위 질문 줄이 빠지고 회계연도만 남는다",
+      "- 재작성:" not in _blk66 and "- 하위 질문:" not in _blk66
+      and ("- 회계연도: %d" % (_now66 - 1)) in _blk66,
+      _blk66.replace(chr(10), " | ")[:160])
+
+# (d) 상대 낱말 없는 질문 → 아무것도 안 한다
+_a66 = _run66("삼성전자 2024년 영업이익", "삼성전자의 2024년 영업이익", [2024],
+              time_note="")
+check("상대 낱말 없음 → rewritten·연도 그대로",
+      _a66["rewritten"] == "삼성전자의 2024년 영업이익"
+      and _a66["fiscal_years"] == [2024] and _a66.get("rel_year") is None)
+
+# (e) 모델이 이미 맞게 환산한 경우 → 치환할 것이 없다
+_a66 = _run66("삼성전자 작년 영업이익",
+              f"삼성전자의 {_now66 - 1}년 영업이익은?", [_now66 - 1])
+check("이미 맞는 연도 → 그대로",
+      _a66["rewritten"] == f"삼성전자의 {_now66 - 1}년 영업이익은?")
+check("hide_rewritten 은 LLM 주입이 안 된다(_DEFAULTS 밖)",
+      "hide_rewritten" not in R._DEFAULTS)
+
+print()
+print("=" * 74)
 print("6 — DART_REWRITE=0 이면 재작성을 부르지 않는다")
 print("=" * 74)
 os.environ["DART_REWRITE"] = "0"

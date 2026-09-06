@@ -453,6 +453,26 @@ def rewrite_question(question, model=None, budget_s=None) -> dict:
         if _ry is not None:
             a["fiscal_years"] = [_ry]
             a["rel_year"] = {"word": _rw, "year": _ry, "base": _rb}
+            # 【rewritten 도 맞춘다 — step67】 코드가 fiscal_years 를 2025 로
+            # 고쳐도 rewritten 에 "…2023년도 영업이익…" 이 남으면 [질문 분석]
+            # 두 줄이 서로 다른 말을 하고, 모델은 rewritten 을 따라간다(실측 —
+            # 2025 사업보고서에서 2023 열을 읽었다).
+            #   연도 1개  → 환산 결과로 치환 (재작성문의 정규화 가치는 살린다)
+            #   연도 여러 → 어느 것이 대상인지 모른다. 치환하지 않고
+            #               [질문 분석] 에서 rewritten 줄을 뺀다(hide_rewritten)
+            #   연도 없음 → 건드리지 않는다
+            # 하위 질문도 같은 치환을 받는다 — 블록에 함께 실리는 텍스트다.
+            _yrs = set(_Q_YEAR.findall(a.get("rewritten") or ""))
+            if len(_yrs) == 1 and _yrs != {str(_ry)}:
+                _wrong = re.compile(r"(?<!\d)" + _yrs.pop() + r"(?!\d)")
+                a["rewritten"] = _wrong.sub(str(_ry), a["rewritten"])
+                a["sub_questions"] = [_wrong.sub(str(_ry), s)
+                                      for s in (a.get("sub_questions") or [])]
+            elif len(_yrs) > 1:
+                a["hide_rewritten"] = True
+            # 모델의 시점 해석은 지운다 — 코드 환산과 다른 연도를 말할 수 있다.
+            # 환산 기록은 think_trace 비고 줄(rel_year)이 담당한다.
+            a["time_note"] = ""
         # 코퍼스 범위 밖 연도(2026 이상 · 2022 이하)는 버리고 안내를 남긴다.
         # range_note 는 **코드만 채운다** — _DEFAULTS 에 없으므로 LLM 이 넣어도
         # _parse 에서 이미 버려졌다. 여기서 무조건 덮어쓴다.
@@ -484,9 +504,11 @@ def analysis_block(a: dict) -> str:
                          or a.get("time_note") or a.get("range_note")):
             return ""
         L = ["[질문 분석 — 사전 분석기의 참고 정보]"]
-        if a.get("rewritten"):
+        # hide_rewritten(step67) — 상대 연도 환산 결과와 다른 연도가 여럿 있어
+        # 치환할 수 없던 재작성문. 두 줄이 다른 말을 하느니 회계연도 줄만 남긴다.
+        if a.get("rewritten") and not a.get("hide_rewritten"):
             L.append(f"- 재작성: {a['rewritten']}")
-        subs = a.get("sub_questions") or []
+        subs = [] if a.get("hide_rewritten") else (a.get("sub_questions") or [])
         if len(subs) > 1:
             L.append("- 하위 질문: " + " / ".join(f"{i}) {s}"
                                                 for i, s in enumerate(subs, 1)))
