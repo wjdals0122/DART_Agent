@@ -694,6 +694,56 @@ def compares_without_calc(text: str, tool_calls: list) -> bool:
         return False
 
 
+# 검문 10 — 답변 연도가 질문 연도와 다름 (step69).
+#
+# 【실측】 "삼성전자 작년 영업이익" — 코드가 2025 로 환산했고 2025 보고서를
+# 정확히 검색했는데, 답변이 "2024년도 영업이익은 32,725,961백만원" — **전기 열**
+# 을 읽었다. 정답은 2025년 43,601,051. 검색까지 다 맞고 마지막 옮겨 적기에서
+# 한 해가 밀리는 유형이라 최종 답변 직전에만 잡을 수 있다.
+#
+# 【오탐을 어떻게 막는가】
+#   - 본문에 서로 다른 연도가 여럿이면(3개년 제시·비교) 발동하지 않는다.
+#     정확히 **한 연도**가 나오고 그것이 대상과 다를 때만 잡는다
+#   - 근거 라벨([회사 보고서 (2024.12), …]) 안의 연도는 대괄호째 지우고 본다.
+#     '\n근거' 절 이후도 버린다 — 본문 서술의 연도만 판정한다
+#   - 대상 연도가 없는 문항(연도 미명시·여러 연도·재작성 실패)은 발동하지 않는다
+AUDIT_YEAR_MISMATCH = (
+    "질문은 {target}년을 물었는데 답변이 {got}년 값을 제시했다. "
+    "검색된 표에서 {target}년 열(당기)의 값을 다시 확인하고 답변을 고쳐라. "
+    "문서 헤더의 '당기는 {target}년' 표기를 참고하라."
+)
+_YEAR_MENTION = re.compile(r"(?<!\d)(20(?:2\d|30))\s*년")
+
+
+def answer_year_mismatch(text, rewrite_info):
+    """(대상 연도, 답변 연도) 또는 None. 예외를 던지지 않는다."""
+    try:
+        rw = rewrite_info or {}
+        a = (rw.get("analysis") or {}) if rw.get("ok") else {}
+        if a.get("hide_rewritten"):            # 여러 연도 질문 — 대상이 특정 안 된다
+            return None
+        rel = a.get("rel_year") or {}
+        if rel.get("year"):
+            target = int(rel["year"])
+        else:
+            fys = a.get("fiscal_years") or []
+            if len(fys) != 1:                  # 연도 미명시·비교 질문
+                return None
+            target = int(fys[0])
+        body = re.sub(r"\[[^\]]*\]", " ", text or "")   # 근거 라벨 제거
+        body = body.split("\n근거")[0]                   # 근거 절 이후 제거
+        years = {int(m.group(1)) for m in _YEAR_MENTION.finditer(body)}
+        if len(years) != 1:                    # 연도 없음 또는 여럿(3개년·비교)
+            return None
+        got = years.pop()
+        if got == target:
+            return None
+        return target, got
+    except Exception:                          # noqa: BLE001 — 검문이 답을 막으면 안 된다
+        traceback.print_exc(file=sys.stderr)
+        return None
+
+
 def announced_but_not_called(text: str, tool_calls: list) -> bool:
     """도구를 부르겠다고 해 놓고 안 불렀나.
 
@@ -1698,6 +1748,9 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
                     kind, note = "all_bad", AUDIT_ALL_BAD
                 elif announced_but_not_called(text, out["tool_calls"]):
                     kind, note = "announced", AUDIT_ANNOUNCED
+                elif (tg := answer_year_mismatch(text, out.get("rewrite"))):
+                    kind = "year_mismatch"
+                    note = AUDIT_YEAR_MISMATCH.format(target=tg[0], got=tg[1])
                 if kind:
                     audited = True
                     prev_answer = text         # 되읊기 방어용 보관 (1-B)

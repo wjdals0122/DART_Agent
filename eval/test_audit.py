@@ -751,6 +751,64 @@ check("답은 그대로 나온다", bool(r4["answer"].strip()), r4["answer"][:40
 
 print()
 print("=" * 74)
+print("검문 10 — 답변 연도가 질문 연도와 다름 (step69)")
+print("=" * 74)
+
+from src.agent.loop import AUDIT_YEAR_MISMATCH, answer_year_mismatch  # noqa: E402
+
+
+def _rw69(rel=None, fys=None, hide=False, ok=True):
+    a = {}
+    if rel:
+        a["rel_year"] = {"word": "작년", "year": rel, "base": 2026}
+    if fys is not None:
+        a["fiscal_years"] = fys
+    if hide:
+        a["hide_rewritten"] = True
+    return {"ok": ok, "analysis": a}
+
+
+# 발동 3종
+check("검문10 발동 — rel_year 2025 · 답변 2024 (실측 사례)",
+      answer_year_mismatch("2024년도 영업이익은 32,725,961백만원입니다.",
+                           _rw69(rel=2025)) == (2025, 2024))
+check("검문10 발동 — 명시 fiscal_years [2024] · 답변 2023",
+      answer_year_mismatch("삼성전자의 2023년 매출은 300조입니다.",
+                           _rw69(fys=[2024])) == (2024, 2023))
+check("검문10 발동 — 근거 라벨의 (2025.12) 는 무시하고 본문 2024 만 본다",
+      answer_year_mismatch(
+          "2024년 값입니다. [삼성전자 사업보고서 (2025.12), 2026-03-11, "
+          "접수번호 20260311000001]", _rw69(rel=2025)) == (2025, 2024))
+
+# 미발동 5종
+check("검문10 미발동 — 연도 일치",
+      answer_year_mismatch("2025년 영업이익은 43,601,051백만원입니다.",
+                           _rw69(rel=2025)) is None)
+check("검문10 미발동 — 3개년 제시(여러 연도)",
+      answer_year_mismatch("- 2025년 43조\n- 2024년 32조\n- 2023년 6조",
+                           _rw69(rel=2025)) is None)
+check("검문10 미발동 — 연도가 근거 라벨 안에만 있다",
+      answer_year_mismatch(
+          "영업이익은 43,601,051백만원입니다.\n\n근거\n"
+          "- [삼성전자 사업보고서 (2024.12), 2025-03-11, 접수번호 20250311000001]",
+          _rw69(rel=2025)) is None)
+check("검문10 미발동 — 대상 연도 없음(연도 미명시 질문)",
+      answer_year_mismatch("2024년 값입니다.", _rw69()) is None)
+check("검문10 미발동 — 비교 질문(fiscal_years 여럿)",
+      answer_year_mismatch("2024년 값입니다.", _rw69(fys=[2023, 2024])) is None)
+
+# 경계·안전
+check("검문10 — hide_rewritten 이면 무동작",
+      answer_year_mismatch("2024년 값.", _rw69(rel=2025, hide=True)) is None)
+check("검문10 — 재작성 실패 문항이면 무동작",
+      answer_year_mismatch("2024년 값.", _rw69(rel=2025, ok=False)) is None)
+check("검문10 — None 입력에 예외 없음", answer_year_mismatch(None, None) is None)
+check("검문10 — 메시지에 대상·답변 연도가 들어간다",
+      "2025년을 물었는데" in AUDIT_YEAR_MISMATCH.format(target=2025, got=2024)
+      and "당기는 2025년" in AUDIT_YEAR_MISMATCH.format(target=2025, got=2024))
+
+print()
+print("=" * 74)
 if FAIL:
     print(f"{len(FAIL)}건 실패: " + ", ".join(FAIL))
     sys.exit(1)
