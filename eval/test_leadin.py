@@ -143,66 +143,48 @@ check("목록형·산문형이 함께 있어도 한 번만", final2.count("근�
 
 print()
 print("=" * 74)
-print("3개년 제시 형식 (step59) — 후처리가 지우지 않는지")
+print("3개년 제시 제거 (step73) — step59·62 를 껐다")
 print("=" * 74)
 
 from src.agent import loop as _L  # noqa: E402
 
-THREE = """SK하이닉스의 연결 매출액입니다.
-- 2025년(제77기) 66,192,960백만원
-- 2024년(제76기) 32,765,719백만원
-- 2023년(제75기) 44,621,568백만원
-
-질문에 연도가 없어 최근 3개 사업연도를 함께 제시했습니다. 특정 연도를 원하시면 알려주시면 그 기준으로 답변드리겠습니다."""
-
-_kept = _L.strip_boilerplate(THREE)
-check("strip_boilerplate 가 '알려주시면' 을 지우지 않는다", "알려주시면" in _kept)
-check("strip_boilerplate 가 '답변드리겠습니다' 를 지우지 않는다",
-      "답변드리겠습니다" in _kept)
-check("3개년 목록 세 줄이 그대로", _kept.count("년(제") == 3, _kept[:120])
-check("strip_leadin 이 첫 줄을 지우지 않는다",
-      "연결 매출액입니다" in _L.strip_leadin(THREE), _L.strip_leadin(THREE)[:60])
-check("실제 값이면 자리표시자로 안 잡힌다",
-      _L.strip_placeholders(THREE).count("년(제") == 3)
-
-# 예시를 그대로 베끼면 걷어낸다
-COPIED = """ㅇㅇ전자의 연결 매출액입니다.
-- 2025년(제NN기) 000,000,000백만원
-- 2024년(제NN기) 000,000,000백만원
-
-근거
-- [○○기업 사업보고서 (2024.12), 2025-03-11, 접수번호 20250311XXXXXX]"""
-check("예시를 베낀 '제NN기' 문단은 제거된다",
-      "제NN기" not in _L.strip_placeholders(COPIED),
-      _L.strip_placeholders(COPIED)[:120])
-check("'000,000,000' 도 제거된다",
-      "000,000,000" not in _L.strip_placeholders(COPIED))
-check("PLACEHOLDERS 에 두 자리표시자가 있다",
-      "제NN기" in _L.PLACEHOLDERS and "000,000,000" in _L.PLACEHOLDERS)
-
-# step62 — 3개년 지시를 REMINDER 로 옮겼다(도구 결과 직후). system.txt 의
-# [시점 해석] 절과 **같은 말**을 해야 한다 — 어긋나면 어느 쪽도 안 지켜진다.
+# 기능을 켰던 두 자리(system.txt [시점 해석] · REMINDER)에서 지시가 사라졌는가.
+# 실측: 연도 명시 질문에 "연도가 없어 3개년…" 문구가 붙었고, 정작 연도 없는
+# 질문에서는 3개년이 안 나왔다 — 의도와 정반대로만 작동해 껐다.
 _SYS = _L.build_system("")
-_SAME = [
-    "질문에 연도가 없어 최근 3개 사업연도를 함께 제시했습니다",
-    "질문에 연도나 '제N기' 가 명시",
-    "목록·서술형 질문",
-]
-for _phrase in _SAME:
-    check(f"step62 — REMINDER 에 있다: {_phrase[:22]}", _phrase in _L.REMINDER)
-    check(f"step62 — system.txt 에도 있다: {_phrase[:22]}", _phrase in _SYS)
-check("step62 — REMINDER 가 단일 수치 조건을 말한다",
-      "단일 수치(매출·영업이익·순이익 등)" in _L.REMINDER)
-check("step62 — REMINDER 가 '최근 3개 사업연도를 모두 제시' 를 말한다",
-      "최근 3개 사업연도를 모두 제시" in _L.REMINDER)
-check("step62 — REMINDER 에 실제 접수번호가 없다",
-      not __import__("re").search(r"(?<!\d)\d{14}(?!\d)", _L.REMINDER))
-check("step62 — REMINDER 에 자리표시자 수치가 없다",
-      "000,000,000" not in _L.REMINDER and "제NN기" not in _L.REMINDER)
-check("step62 — 기존 REMINDER 지시가 그대로 남아 있다",
+for _phrase in ["3개 사업연도", "[시점 해석]"]:
+    check(f"step73 — 시스템 프롬프트에 없다: {_phrase}", _phrase not in _SYS)
+    check(f"step73 — REMINDER 에 없다: {_phrase}", _phrase not in _L.REMINDER)
+check("step73 — [답변 범위] 의 예외 문구도 되돌렸다",
+      "예외는 [시점 해석]" not in _SYS)
+check("step73 — 기존 REMINDER 지시는 그대로 남아 있다",
       "위 자료만으로 답하라." in _L.REMINDER
       and "calculate 도구를 부른다" in _L.REMINDER
       and "확인 가능한 관련 정보:" in _L.REMINDER)
+# 예시 자리표시자 방어(step59 의 부산물)는 남긴다 — 다른 예시 누출도 막는다
+check("step73 — PLACEHOLDERS 방어는 유지",
+      "제NN기" in _L.PLACEHOLDERS and "000,000,000" in _L.PLACEHOLDERS)
+
+# 후처리 안전장치 — 남은 문구는 문장 단위로만 지운다 (_SENT_NUMSAFE 사용)
+_LEAK = ("SK하이닉스의 2024년 영업이익은 43,601,051백만원입니다. "
+         "질문에 연도가 없어 최근 3개 사업연도를 함께 제시했습니다.\n\n"
+         "근거\n- [SK하이닉스 사업보고서 (2024.12), 2025-03-19, 접수번호 20250319000665]")
+_got73 = _L.strip_three_year_note(_LEAK)
+check("step73 — 문구가 있으면 그 문장만 제거",
+      "3개 사업연도" not in _got73 and "43,601,051백만원입니다." in _got73, _got73[:100])
+check("step73 — 문단 구조 보존(근거 절 유지)",
+      "\n\n근거\n" in _got73 and "20250319000665" in _got73)
+_CLEAN = "SK하이닉스의 2024년 영업이익은 43,601,051백만원입니다."
+check("step73 — 문구가 없으면 그대로", _L.strip_three_year_note(_CLEAN) == _CLEAN)
+check("step73 — 소수점 문장은 안 갈린다(_SENT_NUMSAFE)",
+      _L.strip_three_year_note("약 **4.55배** 큰 금액입니다. 질문에 연도가 없어 "
+                               "3개 사업연도를 함께 제시했습니다.")
+      == "약 **4.55배** 큰 금액입니다.")
+check("step73 — 지워서 비면 원문 유지",
+      _L.strip_three_year_note("질문에 연도가 없어 최근 3개 사업연도를 함께 제시했습니다.")
+      == "질문에 연도가 없어 최근 3개 사업연도를 함께 제시했습니다.")
+check("step73 — 예외 없음", _L.strip_three_year_note(None) == ""
+      and _L.strip_three_year_note("") == "")
 
 print()
 print("=" * 74)

@@ -84,14 +84,11 @@ REMINDER = "\n".join([
     "물은 항목이 공시에 없으면, 답변 끝에 '확인 가능한 관련 정보:' 로 검색 결과에 "
     "실제로 있는 대안을 (a)(b) 2~3개 제시하고 '필요한 항목을 알려주시면 그 범위로 "
     "답변드리겠습니다' 로 되묻는다. 없는 항목을 다른 수치로 만들어 채우지 마라.",
-    # 3개년 제시(step59) — system.txt 의 [시점 해석] 절에 넣었지만 실호출에서
-    # 안 먹혔다("삼성전자 매출은?" → 2025 한 해만). 역질문이 같은 경로로
-    # 0/3 → REMINDER 3/3 이 된 전례가 있다(step44-3F). 고칠 지점 옆에서 말한다.
-    # **[시점 해석] 절과 같은 말을 해야 한다** — 어긋나면 어느 쪽도 안 지켜진다.
-    "질문에 연도가 없고 단일 수치(매출·영업이익·순이익 등)를 묻는다면, 표에 있는 "
-    "최근 3개 사업연도를 모두 제시하고 '질문에 연도가 없어 최근 3개 사업연도를 "
-    "함께 제시했습니다' 라고 밝혀라. 질문에 연도나 '제N기' 가 명시돼 있으면 "
-    "그 해만 답한다. 목록·서술형 질문에는 적용하지 마라.",
+    # 【step73 — 3개년 제시 제거】 step59(system.txt) → step62(REMINDER 이동)로
+    # 두 번 시도했으나, 연도 없는 질문에서는 안 나오고 연도 명시 질문에 엉뚱하게
+    # 붙었다(실측: "SK하이닉스 2024년 영업이익" 에 "연도가 없어 3개년…" 문구).
+    # 의도한 곳에서는 작동하지 않고 의도하지 않은 곳에서만 나타나 껐다.
+    # 남은 문구는 후처리(strip_three_year_note)가 걷어낸다.
 ])
 
 # 도구를 한 번도 안 부르고 답하려 할 때 **먼저** 던지는 지시.
@@ -386,6 +383,42 @@ def strip_bad_unit_paren(text: str):
     except Exception:                          # noqa: BLE001
         traceback.print_exc(file=sys.stderr)
         return text or "", 0
+
+
+def strip_three_year_note(text: str) -> str:
+    """'질문에 연도가 없어 최근 3개 사업연도를 함께 제시' 계열 문장만 지운다 (step73).
+
+    3개년 제시 기능(step59→62)을 껐는데, 연도 명시 질문에 이 문구가 엉뚱하게
+    붙은 실측이 있다("SK하이닉스 2024년 영업이익" 답변에 "연도가 없어 3개년…").
+    프롬프트에서 지시를 지웠어도 캐시된 습관처럼 새어 나올 수 있어 코드로 막는다.
+
+    **문장 단위로만** 지우고 문단은 유지한다. 문장 분할은 step60 의
+    `_SENT_NUMSAFE` — 소수점을 문장 끝으로 보면 안 된다. 지워서 비면 원문 유지.
+    """
+    try:
+        body = text or ""
+        if "사업연도" not in body:
+            return body
+
+        def bad(sent: str) -> bool:
+            return ("3개 사업연도" in sent
+                    or ("연도가 없어" in sent and "제시" in sent))
+
+        out_paras = []
+        for para in re.split(r"(\n\s*\n)", body):
+            if para.strip() == "" or para.startswith("\n"):
+                out_paras.append(para)         # 문단 구분자는 그대로
+                continue
+            out_lines = []
+            for line in para.split("\n"):
+                kept = [s for s in _SENT_NUMSAFE.findall(line) if not bad(s)]
+                out_lines.append("".join(kept).rstrip())
+            out_paras.append("\n".join(out_lines).strip("\n"))
+        joined = "".join(out_paras).strip()
+        return joined or body                  # 지워서 비면 원문 유지
+    except Exception:                          # noqa: BLE001 — 후처리가 답을 막으면 안 된다
+        traceback.print_exc(file=sys.stderr)
+        return text or ""
 
 
 AUDIT_CALC = (
@@ -1515,6 +1548,14 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
     except Exception as e:                     # noqa: BLE001
         traceback.print_exc(file=sys.stderr)
         out["note"] = (out.get("note") or "") + f" · 단위 괄호 검증 실패: {e}"
+    # 3개년 제시 잔재 문구 제거(step73) — 기능은 껐고, 새어 나온 문장만 걷는다
+    try:
+        _b = out["answer"]
+        out["answer"] = strip_three_year_note(out["answer"])
+        _note_pp("strip_three_year_note", _b)
+    except Exception as e:                     # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        out["note"] = (out.get("note") or "") + f" · 3개년 문구 제거 실패: {e}"
     # 근거 절은 모델이 아니라 여기서 만든다. 형식이 흔들리면 안 된다.
     #
     # 【retrieved 를 따로 붙드는 이유 — 2026-09-03】
