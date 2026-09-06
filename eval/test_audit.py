@@ -208,6 +208,31 @@ check("연도는 숫자로 세지 않는다",
 check("'최대주주' 는 비교 표현이 아니다",
       not compares_without_calc("최대주주는 30,000,000주, 특수관계인은 5,000,000주를 "
                                 "보유합니다.", tc("search_disclosure")))
+
+# step70 — 비교 표현 확장. 실측: "…보다 약 230,511,856원 적습니다" 가 안 잡혔다
+check("step70 잡음 — '적습니다' (실측 사례)",
+      compares_without_calc(
+          "삼성전자의 연결 매출액(300,870,903백만원)이 OCI홀딩스(575,548,870천원)"
+          "보다 약 230,511,856원 적습니다.", tc("search_disclosure")))
+check("step70 잡음 — '더 많'",
+      compares_without_calc("A(1,500,000백만원)가 B(1,200,000백만원)보다 더 많다.",
+                            tc("search_disclosure")))
+check("step70 잡음 — '차액'",
+      compares_without_calc("차액은 347,727백만원이다(644,000 대 296,273).",
+                            tc("search_disclosure")))
+check("step70 잡음 — '보다 크'",
+      compares_without_calc("자산 25,773,028백만원이 부채 11,830,134백만원보다 크다.",
+                            tc("search_disclosure")))
+check("step70 안 잡음 — '차이가 있습니다' 숫자 없음",
+      not compares_without_calc("두 보고서 사이에 기재 차이가 있습니다.",
+                                tc("search_disclosure")))
+check("step70 안 잡음 — 표현 있어도 숫자 1개뿐",
+      not compares_without_calc("전기보다 더 많은 66,192,960백만원이다.",
+                                tc("search_disclosure")))
+check("step70 안 잡음 — calculate 를 불렀다",
+      not compares_without_calc(
+          "삼성전자가 OCI홀딩스보다 300,870,903 대 575,548 로 적습니다.",
+          tc("calculate")))
 check("비교 표현이 없으면 안 잡는다",
       not compares_without_calc("매출액은 300,870,903백만원, 영업이익은 9,716억원이다.",
                                 tc("search_disclosure")))
