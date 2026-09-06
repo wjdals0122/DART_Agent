@@ -178,7 +178,11 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download('BAA
 
 ## 환경변수 (`.env`)
 
-리포 루트에 `.env` 를 둔다. **키 값은 이 저장소 어디에도 없다.**
+리포 루트에 `.env` 를 둔다. `.env.example` 을 복사해서 값만 채우면 된다.
+
+```bash
+cp .env.example .env      # 그 다음 CLOVA_API_KEY 에 발급받은 키를 넣는다
+```
 
 ```ini
 CLOVA_API_KEY=발급받은_키를_여기에
@@ -186,6 +190,13 @@ CLOVA_API_KEY=발급받은_키를_여기에
 CLOVA_MODEL=HCX-005
 CLOVA_API_HOST=https://clovastudio.stream.ntruss.com
 ```
+
+**키 값은 이 저장소 어디에도 없고, 앞으로도 넣지 않는다.**
+
+- `.env` 는 `.gitignore` 에 있다. `git status` 에 안 뜬다고 "추적되고 있나" 걱정할 필요 없다 — 원래 안 뜨는 게 맞다
+- 키를 `.env.example` · 코드 · 테스트 · 커밋 메시지에 직접 적지 않는다. 한 번 커밋되면 그 뒤에 지워도 히스토리에 남는다
+- 서버에 올릴 때도 파일을 커밋해 나르지 말고 서버의 `.env` 를 직접 편집한다 (`systemd` 는 `EnvironmentFile` 로 읽는다)
+- 키가 노출됐다고 판단되면 파일을 고치기 전에 **CLOVA Studio 에서 먼저 폐기·재발급**한다
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
@@ -319,6 +330,7 @@ dis-044/
 ├── README.md                  이 파일 (API 엔드포인트)
 ├── CLAUDE.md                  작업 상시 규칙
 ├── requirements.txt
+├── .env.example               환경변수 서식. 복사해서 `.env` 로 쓴다 (키 값은 없다)
 ├── serve.sh                   API 기동 (systemd 없는 환경용)
 │
 ├── src/
