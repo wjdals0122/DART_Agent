@@ -1084,6 +1084,29 @@ def _has_value_num(s: str) -> bool:
                for m in _NUM3.finditer(s or ""))
 
 
+# 【소수점은 문장 끝이 아니다 — step60, V4 실호출 실측】
+# 답변이 "55배** 큰 금액입니다." 로 **문장 중간부터** 시작해 나갔다.
+# 원문은 "…이는 정정 전 583억원보다 약 **4.55배** 큰 금액입니다." 였는데
+# `_SENT` 가 소수점 '4.' 를 문장 끝으로 보아 두 조각으로 갈랐고,
+#   앞 조각 "이는 정정 전 583억원보다 약 **4."  ← '정정 전' + 값 → 대조 문장으로 삭제
+#   뒤 조각 "55배** 큰 금액입니다."              ← 남았다
+# 가 되었다. **조건이 과한 것이 아니라 문장 경계 판정이 틀렸다.**
+# 숫자와 숫자 사이의 마침표는 문장을 끝내지 않는다.
+_SENT_NUMSAFE = re.compile(r"(?:[^.!?\n]|(?<=\d)\.(?=\d))+[.!?\n]?")
+
+# 지워서 이만큼도 안 남으면 아예 지우지 않는다. 대조 문장 하나를 덜어내는 것이
+# 이 후처리의 목적이지, 답변을 반으로 줄이는 것이 아니다. 그만큼 줄었다면
+# 문장 경계를 잘못 잡았다고 보는 편이 안전하다.
+#
+# 【짧은 답변에는 적용하지 않는다 — 안 그러면 step46 자체가 죽는다】
+# "최종 금액은 644억원입니다. 기존 583억원에서 증가했습니다." 처럼 **두 문장짜리**
+# 답변에서 대조 문장 하나를 지우면 당연히 절반 근처가 된다. 그건 정상 동작이다.
+# 그래서 원문이 3문장 이상일 때만 비율을 본다 — 여러 문장 중 절반 넘게 사라지는
+# 것은 정상적인 '대조 문장 한 줄 제거' 가 아니다.
+_MIN_KEEP_RATIO = 0.5
+_RATIO_MIN_SENTS = 3
+
+
 def strip_correction_contrast(text: str, question: str = "") -> str:
     """'기존 583억원에서 증가한' 류 정정 전 값 대조 문장을 지운다. 예외 없음."""
     try:
@@ -1103,12 +1126,17 @@ def strip_correction_contrast(text: str, question: str = "") -> str:
                 continue
             out_lines = []
             for line in para.split("\n"):
-                kept = [s for s in _SENT.findall(line) if not is_contrast(s)]
+                kept = [s for s in _SENT_NUMSAFE.findall(line) if not is_contrast(s)]
                 out_lines.append("".join(kept).rstrip())
             out_paras.append("\n".join(out_lines).strip("\n"))
         joined = "".join(out_paras).strip()
         # 지운 뒤 정정 후 값이 남아 있어야 한다. 없으면 실속을 잃은 것 — 원문 유지
         if not joined or not _has_value_num(joined):
+            return body
+        # 안전장치 — 3문장 이상인 답변이 절반 미만으로 줄었으면 지우지 않는다(step60)
+        n_sents = sum(1 for s in _SENT_NUMSAFE.findall(body) if s.strip())
+        if n_sents >= _RATIO_MIN_SENTS and \
+                len(joined) < len(body.strip()) * _MIN_KEEP_RATIO:
             return body
         return joined
     except Exception:                          # noqa: BLE001 — 후처리가 답을 막으면 안 된다

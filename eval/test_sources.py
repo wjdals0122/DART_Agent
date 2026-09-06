@@ -180,6 +180,56 @@ for bad in (None, "", "  "):
         ok = False
     check(f"strip_correction_contrast({bad!r}) 예외 없음(step46)", ok)
 
+# step60 — 소수점을 문장 끝으로 봐서 답변이 문장 중간부터 시작한 사고.
+# V4 실호출 실측: answer 가 "55배** 큰 금액입니다." 로 시작해 나갔다.
+V4_ORIG = "\n".join([
+    "HD현대일렉트릭이 2024년 1월 30일에 체결한 고압차단기 공급계약의 "
+    "최종 계약금액은 644억원입니다. 이는 정정 전 583억원보다 약 **4.55배** 큰 금액입니다.",
+    "",
+    "근거",
+    "- [HD현대일렉트릭 분기보고서 (2026.03), 2026-05-15, 접수번호 20260515002315]",
+])
+_v4 = strip_correction_contrast(V4_ORIG, "고압차단기 공급계약의 최종 계약금액은?")
+check("step60 — 문장 중간 조각('55배**')이 남지 않는다",
+      "55배**" not in _v4, repr(_v4[:120]))
+check("step60 — 대조 문장은 통째로 지워진다", "정정 전 583" not in _v4, repr(_v4[:120]))
+check("step60 — 확정값 644 는 남는다", "644억원" in _v4, repr(_v4[:120]))
+check("step60 — 근거 절이 남는다", "근거" in _v4 and "20260515002315" in _v4)
+check("step60 — 첫 글자가 회사명이다(문장 중간 시작 아님)",
+      _v4.startswith("HD현대일렉트릭"), repr(_v4[:40]))
+
+from src.agent.loop import (_MIN_KEEP_RATIO, _RATIO_MIN_SENTS, _SENT,  # noqa: E402
+                            _SENT_NUMSAFE)
+
+_DEC = "약 **4.55배** 큰 금액입니다."
+check("step60 — 소수점은 문장을 끊지 않는다",
+      _SENT_NUMSAFE.findall(_DEC) == [_DEC], str(_SENT_NUMSAFE.findall(_DEC)))
+check("step60 — 옛 _SENT 는 실제로 갈랐다(회귀 근거)",
+      len(_SENT.findall(_DEC)) == 2, str(_SENT.findall(_DEC)))
+check("step60 — 문장 끝 마침표는 여전히 끊는다",
+      len(_SENT_NUMSAFE.findall("첫 문장이다. 둘째 문장이다.")) == 2,
+      str(_SENT_NUMSAFE.findall("첫 문장이다. 둘째 문장이다.")))
+check("step60 — 숫자 뒤 마침표 + 공백은 문장 끝이다",
+      len(_SENT_NUMSAFE.findall("금액은 644. 다음 문장이다.")) == 2)
+check("step60 — 소수 여러 개도 안 끊긴다",
+      _SENT_NUMSAFE.findall("1.5배에서 2.75배로 늘었다.")
+      == ["1.5배에서 2.75배로 늘었다."])
+
+# 3문장 이상인데 절반 미만으로 줄면 아예 지우지 않는다
+_HALF = ("최종 금액은 644억원입니다. 이는 정정 전 583억원에서 증가한 값입니다. "
+         "기존 583억원과 비교하면 크게 늘어난 금액입니다.")
+_got = strip_correction_contrast(_HALF, "최종 금액은?")
+check("step60 — 3문장 이상이 절반 미만으로 줄면 원문 유지",
+      _got == _HALF, f"{len(_got)}/{len(_HALF)} {_got!r}")
+check("step60 — _MIN_KEEP_RATIO 가 0.5", _MIN_KEEP_RATIO == 0.5)
+check("step60 — 두 문장짜리는 비율 안전장치를 타지 않는다(step46 유지)",
+      strip_correction_contrast(
+          "최종 계약금액은 644억원입니다. 기존 583억원에서 증가했습니다.", "최종 금액은?")
+      .strip() == "최종 계약금액은 644억원입니다.",
+      repr(strip_correction_contrast(
+          "최종 계약금액은 644억원입니다. 기존 583억원에서 증가했습니다.", "최종 금액은?")))
+check("step60 — _RATIO_MIN_SENTS 가 3", _RATIO_MIN_SENTS == 3)
+
 # step40 (3-F) — 역질문 블록은 상투구가 아니다. 지우면 채점 항목을 잃는다.
 ASKBACK = ("해당 항목은 공시에서 확인되지 않습니다.\n\n"
            "확인 가능한 관련 정보:\n"
