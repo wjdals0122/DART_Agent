@@ -36,7 +36,7 @@ for _p in (_PREPROCESS_DIR, _THIS_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-import pdf_parser  # 3_preprocess/pdf_parser.py
+import pdf_parser 
 import periodic_parser as pp
 
 
