@@ -267,8 +267,12 @@ def render_trace(res: dict) -> str:
     return "\n".join(out)
 
 
-def make_answer(question_id: str, question: str) -> dict:
-    """규격 5필드. 여기서 예외가 새어 나가면 안 된다."""
+def make_answer(question_id: str, question: str, detail: dict = None) -> dict:
+    """규격 5필드. 여기서 예외가 새어 나가면 안 된다.
+
+    `detail` 을 주면 에이전트 루프의 결과(res)를 그대로 담아 준다 — 요청 로그가
+    도구 호출·후처리 내역을 남기는 데 쓴다(step61). 반환값은 언제나 5필드 그대로다.
+    """
     out = {"question_id": str(question_id or ""), "question": str(question or ""),
            "retrieved_context": "", "think_trace": "", "answer": ""}
     if not (question or "").strip():
@@ -308,6 +312,8 @@ def make_answer(question_id: str, question: str) -> dict:
             raise box["err"]
 
         res = box["res"]
+        if isinstance(detail, dict) and isinstance(res, dict):
+            detail["res"] = res
         out["retrieved_context"] = render_context(res)
         out["think_trace"] = render_trace(res)
         out["answer"] = (res.get("answer") or "").strip() or FALLBACK
@@ -338,17 +344,43 @@ def handle_health() -> tuple:
 REQ_LOG = ROOT / "logs" / "requests.jsonl"
 
 
-def log_request(question_id: str, question: str, status: int, sec: float) -> None:
-    """받은 질문을 **UTF-8 로** 한 줄 남긴다. 실패해도 응답을 막지 않는다.
+def log_request(question_id: str, question: str, status: int, sec: float,
+                res: dict = None) -> None:
+    """받은 질문과 답변을 **UTF-8 로** 한 줄 남긴다. 실패해도 응답을 막지 않는다.
 
     uvicorn 의 access 로그에는 percent-encoding 된 경로만 남아 한글을 눈으로
     확인할 수 없다. 인코딩 사고가 났을 때 "무엇을 받았는가" 를 볼 자리가 필요하다.
+
+    【답변까지 남기는 이유 — step61】
+    V4 실호출에서 답변이 문장 중간부터 시작해 나갔는데(소수점 문장 분할 사고),
+    이 로그에 질문만 있어서 **원본을 못 찾고 재현에 의존해야 했다.**
+    200문항 본평가 중 같은 일이 나면 되짚을 자리가 없다. 그래서 남긴다.
+
+      answer      최종 답변 전문
+      answer_raw  후처리 **전** 전문. 실제로 지운 것이 있을 때만 채워진다
+                  (붙이기만 한 경우는 최종 답변에서 되짚을 수 있어 생략 — 파일 크기)
+      tool_calls  name · arguments · status
+      postproc    어떤 후처리가 몇 글자를 줄였나 (removed 가 음수면 붙인 것)
     """
     try:
         REQ_LOG.parent.mkdir(parents=True, exist_ok=True)
         row = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "status": status,
                "question_id": question_id, "question": question,
                "seconds": round(sec, 2)}
+        if isinstance(res, dict):
+            row["answer"] = str(res.get("answer") or "")
+            raw = str(res.get("answer_raw") or "")
+            if raw:                            # 지운 것이 있을 때만
+                row["answer_raw"] = raw
+            row["tool_calls"] = [
+                {"name": str(c.get("name") or ""),
+                 "arguments": c.get("arguments") if isinstance(
+                     c.get("arguments"), dict) else {},
+                 "status": str(c.get("status") or "")}
+                for c in (res.get("tool_calls") or []) if isinstance(c, dict)]
+            row["postproc"] = [
+                {"fn": str(p.get("fn") or ""), "removed": int(p.get("removed") or 0)}
+                for p in (res.get("postproc") or []) if isinstance(p, dict)]
         with open(REQ_LOG, "a", encoding="utf-8", newline="\n") as fh:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
     except Exception as e:                     # noqa: BLE001 — 로그가 답을 막으면 안 된다
@@ -366,8 +398,10 @@ def handle_answer(params: dict) -> tuple:
                      "elapsed": round(time.time() - STATE["started_at"], 1)}
     STATE["served"] += 1
     t0 = time.time()
-    body = make_answer(qid, q)
-    log_request(qid, q, 200, time.time() - t0)
+    detail: dict = {}
+    body = make_answer(qid, q, detail)
+    # 답변 전문·도구 호출·후처리 내역까지 남긴다(step61). 로깅 실패는 응답을 막지 않는다.
+    log_request(qid, q, 200, time.time() - t0, detail.get("res"))
     return 200, body
 
 

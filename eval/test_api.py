@@ -298,6 +298,115 @@ def main() -> int:
     ctx = S.render_context(huge)
     check("단일 초과 문서도 통째로", ("가" * 50_000) in ctx, f"{len(ctx):,}자")
 
+    # ---------------------------------------------------------------- step61
+    print(f"\n{BAR}\n요청 로그에 답변·도구·후처리를 남긴다 (step61)\n{BAR}")
+    import tempfile  # noqa: PLC0415
+
+    RES = {
+        "answer": "최종 계약금액은 644억원입니다.",
+        "answer_raw": "최종 계약금액은 644억원입니다. 기존 583억원에서 증가했습니다.",
+        "tool_calls": [{"n": 0, "name": "get_progress_table",
+                        "arguments": {"corp_name": "HD현대일렉트릭"},
+                        "status": "ok", "summary": "진행상황 표 선조회 · 5건",
+                        "note": "무시되어야 하는 필드"}],
+        "postproc": [{"fn": "strip_correction_contrast", "removed": 26},
+                     {"fn": "attach_sources", "removed": -66}],
+    }
+    real_log = S.REQ_LOG
+    with tempfile.TemporaryDirectory() as td:
+        S.REQ_LOG = Path(td) / "requests.jsonl"
+        try:
+            S.log_request("Q-1", "최종 계약금액은?", 200, 1.23, RES)
+            rows = [json.loads(x) for x in
+                    S.REQ_LOG.read_text(encoding="utf-8").splitlines() if x.strip()]
+            r = rows[-1]
+            check("answer 를 남긴다", r.get("answer") == RES["answer"], repr(r.get("answer")))
+            check("answer_raw 를 남긴다", r.get("answer_raw") == RES["answer_raw"])
+            check("tool_calls 는 name·arguments·status 만",
+                  r.get("tool_calls") == [{"name": "get_progress_table",
+                                           "arguments": {"corp_name": "HD현대일렉트릭"},
+                                           "status": "ok"}],
+                  json.dumps(r.get("tool_calls"), ensure_ascii=False))
+            check("postproc 를 남긴다",
+                  r.get("postproc") == RES["postproc"],
+                  json.dumps(r.get("postproc"), ensure_ascii=False))
+            check("한글이 UTF-8 로 그대로", "계약금액" in r.get("answer", ""))
+            check("기존 필드는 그대로",
+                  r.get("question_id") == "Q-1" and r.get("seconds") == 1.23
+                  and r.get("status") == 200)
+
+            # 지운 것이 없으면 answer_raw 는 남기지 않는다 (파일 크기)
+            S.log_request("Q-2", "질문", 200, 0.1,
+                          {"answer": "값", "answer_raw": "",
+                           "tool_calls": [], "postproc": [{"fn": "attach_sources",
+                                                           "removed": -10}]})
+            r2 = [json.loads(x) for x in
+                  S.REQ_LOG.read_text(encoding="utf-8").splitlines() if x.strip()][-1]
+            check("지운 것이 없으면 answer_raw 없음", "answer_raw" not in r2, str(sorted(r2)))
+
+            # res 를 안 주면 예전 모양 그대로
+            S.log_request("Q-3", "질문", 503, 0.0)
+            r3 = [json.loads(x) for x in
+                  S.REQ_LOG.read_text(encoding="utf-8").splitlines() if x.strip()][-1]
+            check("res 없으면 옛 필드만",
+                  set(r3) == {"at", "status", "question_id", "question", "seconds"},
+                  str(sorted(r3)))
+
+            # 로깅이 죽어도 예외가 새지 않는다
+            S.REQ_LOG = Path(td) / "없는디렉터리" / "x" / "requests.jsonl"
+            ok = True
+            try:
+                S.log_request("Q-4", "질문", 200, 0.1, {"tool_calls": "이상한값",
+                                                      "postproc": None})
+            except Exception:                  # noqa: BLE001
+                ok = False
+            check("로깅 실패가 예외를 던지지 않는다", ok)
+        finally:
+            S.REQ_LOG = real_log
+
+    # answer() 가 postproc·answer_raw 를 채우는가 (LLM 0회 — _run 을 가짜로)
+    def _fake_run(question, out, *a, **k):
+        out["answer"] = ("최종 계약금액은 644억원입니다. 이는 정정 전 583억원에서 "
+                         "증가한 값입니다. 자세한 내용은 관련 기관에 문의하시기 바랍니다.")
+        out["sources"] = ["[HD현대일렉트릭 분기보고서 (2026.03), 2026-05-15, "
+                          "접수번호 20260515002315]"]
+        return out
+
+    _real_run = loop_mod._run
+    loop_mod._run = _fake_run
+    try:
+        rr = loop_mod.answer("최종 계약금액은?")
+    finally:
+        loop_mod._run = _real_run
+    fns = [p["fn"] for p in rr["postproc"]]
+    check("postproc 에 실행된 후처리가 순서대로",
+          fns[:2] == ["strip_boilerplate", "strip_correction_contrast"], str(fns))
+    check("지운 단계는 removed > 0",
+          all(p["removed"] > 0 for p in rr["postproc"] if p["fn"].startswith("strip")),
+          json.dumps(rr["postproc"], ensure_ascii=False))
+    check("붙인 단계는 removed < 0",
+          any(p["removed"] < 0 for p in rr["postproc"] if p["fn"] == "attach_sources"),
+          json.dumps(rr["postproc"], ensure_ascii=False))
+    check("answer_raw 가 후처리 전 전문", "관련 기관에 문의" in rr["answer_raw"],
+          rr["answer_raw"][:60])
+    check("최종 answer 에는 지워진 문장이 없다",
+          "관련 기관에 문의" not in rr["answer"] and "정정 전 583" not in rr["answer"],
+          rr["answer"][:80])
+
+    # 후처리가 아무것도 안 지우면 answer_raw 는 비어 있다
+    def _clean_run(question, out, *a, **k):
+        out["answer"] = "2024년 연결 매출액은 300,870,903백만원입니다."
+        out["sources"] = []
+        return out
+
+    loop_mod._run = _clean_run
+    try:
+        rc = loop_mod.answer("매출액은?")
+    finally:
+        loop_mod._run = _real_run
+    check("지운 것이 없으면 answer_raw 는 빈 문자열", rc["answer_raw"] == "",
+          repr(rc["answer_raw"]))
+
     print(f"\n{BAR}")
     if FAIL:
         print(f"실패 {len(FAIL)}건: {FAIL}")

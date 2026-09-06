@@ -6687,3 +6687,68 @@ _SENT_NUMSAFE = re.compile(r"(?:[^.!?\n]|(?<=\d)\.(?=\d))+[.!?\n]?")
 
 1~6번 **PASS→FAIL 없음**(3번은 기준선도 FAIL 인 기존 흔들림 '같음'),
 7번 PASS 유지(개선). **7문항 답변 전부 문장 처음부터 시작한다** — 잘림 0건.
+
+---
+
+## step61 — 요청 로그에 답변·도구·후처리를 남긴다 (2026-09-06)
+
+### 왜
+
+step60(V4 답변 잘림) 때 **원본을 로그에서 못 찾아 재현에 의존했다.**
+`logs/requests.jsonl` 이 `at · status · question_id · question · seconds` 만
+남기고 답변 본문을 저장하지 않았기 때문이다.
+200문항 본평가 중 같은 일이 나면 되짚을 자리가 없다.
+
+### 남기는 것
+
+| 필드 | 내용 |
+|---|---|
+| `answer` | 최종 답변 전문 |
+| `answer_raw` | 후처리 **전** 전문 — **실제로 지운 것이 있을 때만** |
+| `tool_calls` | `name` · `arguments` · `status` (summary·note 는 안 남긴다) |
+| `postproc` | `{fn, removed}` — 어느 후처리가 몇 글자를 줄였나 |
+
+`removed` 가 **음수면 붙인 것**이다(근거 절·무근거 표시). 실제 출력 예:
+
+```json
+"postproc": [{"fn": "strip_boilerplate", "removed": 27},
+             {"fn": "strip_correction_contrast", "removed": 26},
+             {"fn": "attach_sources", "removed": -66}]
+```
+
+이 한 줄만 봐도 step60 사고를 **로그에서 바로 특정**할 수 있다 —
+어느 함수가 몇 글자를 지웠는지와 지우기 전 원문이 함께 있다.
+
+### 파일 크기
+
+`answer_raw` 는 **지운 것이 있을 때만** 채운다. 붙이기만 한 경우(근거 절)는
+최종 답변에서 되짚을 수 있어 생략한다.
+한 줄 실측 약 **1.7KB** → 200문항이면 **약 334KB**. 부담 없다.
+
+### 어떻게 이었나
+
+- `loop.answer()` 에 `out["answer_raw"]` · `out["postproc"]` 추가.
+  후처리 다섯 단계(`strip_boilerplate` · `strip_correction_contrast` ·
+  `strip_placeholders` · `attach_sources` · `mark_unsourced`)를 각각 전후로 재어
+  달라졌을 때만 기록한다. 기록 함수 자체도 `try/except` 로 감쌌다
+- `server.make_answer(qid, q, detail=None)` — `detail` 을 주면 루프 결과를 담아 준다.
+  **반환값은 언제나 5필드 그대로다**(주최측 규격)
+- `server.log_request(..., res=None)` — `res` 가 없으면 **예전 모양 그대로** 남는다.
+  기동 전 503 경로가 그 경우다
+- 로깅 실패는 기존대로 `try/except` 안에서 stderr 에만 적고 응답을 막지 않는다
+
+### 검증 — LLM 0회
+
+`eval/test_api.py` 에 15건 추가, 전부 PASS.
+
+```
+로그 필드 6   answer · answer_raw · tool_calls(3필드만) · postproc · 한글 · 기존 필드
+생략 규칙 2   지운 것 없으면 answer_raw 없음 · res 없으면 옛 필드만
+실패 안전 1   쓰기 실패·이상한 값에도 예외 없음
+루프 연결 6   후처리 순서 · 지운 단계 removed>0 · 붙인 단계 removed<0 ·
+              answer_raw 가 후처리 전 전문 · 최종 answer 에는 없음 ·
+              안 지웠으면 answer_raw 빈 문자열
+```
+
+**LLM 0회 검증 15종 전량 15/15 통과.**
+회귀는 지시대로 돌리지 않았다 — 로깅만 바뀌고 답변 생성 경로는 그대로다.

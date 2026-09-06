@@ -1230,6 +1230,10 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
            "rewrite": {"ok": False, "note": "실행 안 됨", "analysis": None,
                        "elapsed": 0.0},
            "stopped_by_budget": False, "unsourced_claim": False,
+           # 후처리 추적 (step61) — V4 답변 잘림 사고에서 원본을 로그로 못 찾아
+           # 재현에 의존했다. 어느 후처리가 무엇을 얼마나 지웠는지 남긴다.
+           # answer_raw 는 **실제로 지운 것이 있을 때만** 채운다(파일 크기).
+           "answer_raw": "", "postproc": [],
            # 검색이 올린 청크 원문. 평가 서버가 retrieved_context 로 그대로 내보낸다.
            # sources 는 출처 문자열뿐이라 본문이 없다.
            "documents": []}
@@ -1240,29 +1244,49 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
         out["note"] = f"루프 실패: {type(e).__name__}: {e}"
     if not (out.get("answer") or "").strip():
         out["answer"] = FALLBACK + (f" (사유: {out['note']})" if out.get("note") else "")
+
+    # 후처리 추적(step61). 어느 단계가 무엇을 얼마나 바꿨는지 기록한다.
+    # removed 는 (전 길이 - 후 길이) — 음수면 붙인 것이다(근거 절 등).
+    raw_answer = out["answer"]
+
+    def _note_pp(fn: str, before: str) -> None:
+        try:
+            after = out.get("answer") or ""
+            if after != (before or ""):
+                out["postproc"].append({"fn": fn,
+                                        "removed": len(before or "") - len(after)})
+        except Exception:                      # noqa: BLE001 — 기록이 답을 막으면 안 된다
+            traceback.print_exc(file=sys.stderr)
+
     # 공시 근거 없는 상투구는 근거 절을 붙이기 **전에** 지운다.
     # 나중에 지우면 근거 절까지 함께 흔들린다.
     try:
+        _b = out["answer"]
         out["answer"] = strip_boilerplate(out["answer"])
+        _note_pp("strip_boilerplate", _b)
     except Exception as e:                     # noqa: BLE001
         traceback.print_exc(file=sys.stderr)
         out["note"] = (out.get("note") or "") + f" · 상투구 제거 실패: {e}"
     # 정정 전 값 대조 문장 제거(step46) — 프롬프트([정정공시] 절)로 두 번 샌 자리
     try:
+        _b = out["answer"]
         stripped = strip_correction_contrast(out["answer"], str(question))
         if stripped != (out["answer"] or "").strip() and stripped != out["answer"]:
             out["waste"]["contrast_stripped"] = True
         out["answer"] = stripped
+        _note_pp("strip_correction_contrast", _b)
     except Exception as e:                     # noqa: BLE001
         traceback.print_exc(file=sys.stderr)
         out["note"] = (out.get("note") or "") + f" · 대조 제거 실패: {e}"
     # 자리표시자(프롬프트 예시) 누출은 검문과 무관하게 항상 막는다 (1-B c).
     # e2e_v5 4번에서 예시의 'ㅇㅇ전자 300,870,903' 이 답변으로 나갔다.
     try:
+        _b = out["answer"]
         cleaned = strip_placeholders(out["answer"])
         if cleaned != (out["answer"] or "").strip():
             out["waste"]["placeholder_stripped"] = True
             out["answer"] = cleaned or (FALLBACK + " (사유: 답변이 예시 자리표시자뿐이었다)")
+        _note_pp("strip_placeholders", _b)
     except Exception as e:                     # noqa: BLE001
         traceback.print_exc(file=sys.stderr)
         out["note"] = (out.get("note") or "") + f" · 자리표시자 제거 실패: {e}"
@@ -1275,18 +1299,29 @@ def answer(question, model=None, max_tool_calls=MAX_TOOL_CALLS,
     # "공시 조회로 확인되지 않았습니다" 딱지가 붙는다(실측: e2e 재실행 3번째 문항).
     retrieved = list(out.get("sources") or [])
     try:
+        _b = out["answer"]
         out["answer"], out["sources"] = attach_sources(out["answer"], retrieved)
+        _note_pp("attach_sources", _b)
     except Exception as e:                     # noqa: BLE001 — 붙이다 죽으면 안 된다
         traceback.print_exc(file=sys.stderr)
         out["note"] = (out.get("note") or "") + f" · 근거 절 조립 실패: {e}"
     # 근거 0건인데 숫자·사실을 단정했으면 지우지 말고 표시만 한다
     try:
+        _b = out["answer"]
         if has_unsourced_claim(out["answer"], retrieved):
             out["unsourced_claim"] = True
             out["answer"] = mark_unsourced(out["answer"])
+        _note_pp("mark_unsourced", _b)
     except Exception as e:                     # noqa: BLE001
         traceback.print_exc(file=sys.stderr)
         out["note"] = (out.get("note") or "") + f" · 무근거 표시 실패: {e}"
+    # 실제로 **지운 것**이 있을 때만 원본을 들고 나간다. 붙이기만 한 경우
+    # (근거 절·무근거 표시)는 최종 답변에서 되짚을 수 있어 남기지 않는다.
+    try:
+        if any((p.get("removed") or 0) > 0 for p in out["postproc"]):
+            out["answer_raw"] = raw_answer
+    except Exception:                          # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
     out["elapsed"] = round(time.time() - t0, 2)
     return out
 
