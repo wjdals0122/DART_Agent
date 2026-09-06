@@ -1262,7 +1262,29 @@ def strip_boilerplate(text: str) -> str:
 #   (3) 지운 뒤에도 답변에 연도 아닌 숫자(정정 후 값)가 남을 때만.
 # 문장 단위로만 지운다. 질문이 정정 전후 차이를 명시적으로 물으면 안 지운다.
 _CONTRAST_WORDS = ("기존", "이전", "정정 전", "에서 증가", "에서 변경", "에서 감소")
+# 【step72 — 낱말 목록의 사각지대를 정규식으로 메운다. 오늘 세 번째 관측】
+#   "기존 583억원에서 증가한"        → 낱말로 잡힘
+#   "최초 583억원이었으나 …추가되어"  → 안 잡혔다 (step54 회귀 1회차)
+#   "583억원에서 644억원으로 증가"   → 안 잡혔다 (회귀 7번 FAIL 의 유일한 경로)
+# '최초·기존·당초' 는 **반드시 숫자와 함께**일 때만 — 낱말 단독은 흔하다.
+# 두 번째 식은 지시 원안("(최초|기존|당초)\s*[\d,]+…")에서 **한 뼘 넓혔다** —
+# 실제 관측 문장이 "최초 **계약금액은** 583억원이었으나" 로, 낱말과 숫자 사이에
+# 단어가 낀다. 한글 단어 **최대 2개**까지만 허용하고 숫자+어미 앵커는 그대로 둔다.
+# 단위부도 지시 원안("억?만?원?")에서 넓혔다 — 그대로는 '백만원·천원' 이 안
+# 잡힌다("40,000백만원에서" 의 '백' 이 막는다). 코퍼스 표의 주 단위가 백만원이다.
+_CONTRAST_UNIT = r"(?:십억|백만|천|억|만)?원?"
+_CONTRAST_RES = (
+    re.compile(r"에서\s*[\d,]+\s*" + _CONTRAST_UNIT + r"\s*으로\s*(증가|감소|변경|정정)"),
+    re.compile(r"(최초|기존|당초)\s*(?:[가-힣]+\s*){0,2}"
+               r"[\d,]+\s*" + _CONTRAST_UNIT + r"\s*(이었으나|였으나|에서)"),
+)
 _CONTRAST_ASK = ("정정 전", "변경 전", "얼마에서 얼마로")
+
+
+def _has_contrast(s: str) -> bool:
+    """낱말 목록 또는 정규식 어느 쪽이든 걸리면 대조 표현이다."""
+    return (any(w in s for w in _CONTRAST_WORDS)
+            or any(rx.search(s) for rx in _CONTRAST_RES))
 
 
 def _has_value_num(s: str) -> bool:
@@ -1300,11 +1322,11 @@ def strip_correction_contrast(text: str, question: str = "") -> str:
         if any(w in (question or "") for w in _CONTRAST_ASK):
             return text or ""                  # 질문이 대조를 요구했다
         body = text or ""
-        if not any(w in body for w in _CONTRAST_WORDS):
+        if not _has_contrast(body):
             return body
 
         def is_contrast(sent: str) -> bool:
-            return any(w in sent for w in _CONTRAST_WORDS) and _has_value_num(sent)
+            return _has_contrast(sent) and _has_value_num(sent)
 
         out_paras = []
         for para in re.split(r"(\n\s*\n)", body):
