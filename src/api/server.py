@@ -261,6 +261,13 @@ def render_trace(res: dict) -> str:
         tail.append(f"400 재시도 {w['retry_400']}회")
     if w.get("tools_dropped"):
         tail.append("도구 없이 재시도함")
+    # 상대 연도 환산(step65)은 **비고 줄에만** 남긴다 — answer 본문·[질문 분석]·
+    # 재작성 프롬프트 어디에도 날짜·환산 설명을 넣지 않는 계약이다.
+    _ry = (((res.get("rewrite") or {}).get("analysis") or {}).get("rel_year")
+           if isinstance(res.get("rewrite"), dict) else None)
+    if isinstance(_ry, dict) and _ry.get("word"):
+        tail.append(f"상대 연도 환산: {_ry['word']} → {_ry.get('year')} "
+                    f"(기준 {_ry.get('base')})")
     u = res.get("usage") or {}
     tail.append(f"LLM {u.get('llm_calls', 0)}회 · {res.get('elapsed', 0):.1f}초")
     out.append(f"{n}. 비고: " + " · ".join(tail))

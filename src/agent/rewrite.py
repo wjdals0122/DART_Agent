@@ -96,7 +96,7 @@ _FY_NOTE_PAST = (
 # 4배가 된다. 그래서 **여러 시점을 훑어야 답이 되는 질문**만 고른다.
 #   (a) 질문 원문에 4자리 연도(2020~2030)도 '제N기' 표기도 없고
 #   (b) 아래 낱말 중 하나가 있을 때
-# '작년·전년·올해' 같은 상대 연도는 **건드리지 않는다** — 재작성 환산에 맡긴다.
+# '작년·전년·올해' 같은 상대 연도는 여기서 안 건드린다 — 코드 환산이 한다(step65).
 _Q_YEAR = re.compile(r"(?<!\d)20(?:2\d|30)(?!\d)")      # 2020~2030
 _Q_KI = re.compile(r"제\s*\d+\s*기")
 # 【'현황'·'변동' 을 뺐다 — step56】
@@ -123,6 +123,53 @@ def is_multi_period(question) -> bool:
     except Exception:                          # noqa: BLE001
         traceback.print_exc(file=sys.stderr)
         return False
+
+
+# ------------------------------------------------- 상대 연도 환산 (step65)
+#
+# 【왜 코드로 하는가 — 실측 2026-09-06】
+# "삼성전자 작년 영업이익" 을 재작성이 "직전 회계연도 2024" 로 환산했다.
+# 오늘은 2026년이므로 작년은 2025 다. 그 결과 2024 사업보고서를 검색했고,
+# 거기서 다시 2023 열(6,566,976)을 읽었다 — 두 해가 밀렸다.
+# 산수는 모델이 아니라 코드가 한다. 현재 연도는 datetime 에서 잡는다(하드코딩 금지).
+#
+# 순서 주의 — '재작년' 이 '작년' 을, '전전년' 이 '전년' 을 품는다. 긴 것 먼저.
+_REL_N_YEARS = re.compile(r"([0-9]+|[일이삼사오육칠팔구]|십)\s*년\s*전")
+_KOR_DIGIT = {"일": 1, "이": 2, "삼": 3, "사": 4, "오": 5,
+              "육": 6, "칠": 7, "팔": 8, "구": 9, "십": 10}
+_REL_WORDS = (
+    ("재작년", 2), ("전전년", 2),
+    ("작년", 1), ("전년", 1), ("지난해", 1),
+    ("올해", 0), ("금년", 0), ("이번 해", 0), ("이번해", 0),
+)
+
+
+def resolve_relative_year(question, now_year=None):
+    """(환산 연도 또는 None, 걸린 표현, 기준 연도). 예외를 던지지 않는다.
+
+    `now_year` 는 테스트에서 고정할 수 있게 인자로 뺐다. 기본은 datetime.
+    """
+    try:
+        if now_year is None:
+            from datetime import datetime
+            now_year = datetime.now().year
+        q = str(question or "")
+        # 명시 연도·기수가 있으면 건드리지 않는다 — "2024년 매출의 전년 대비 증가율"
+        # 에서 '전년' 이 2024 를 덮어쓰면 안 된다. 명시가 언제나 이긴다(step53 과 동일).
+        if _Q_YEAR.search(q) or _Q_KI.search(q):
+            return None, "", now_year
+        m = _REL_N_YEARS.search(q)               # "N년 전" 이 낱말보다 구체적이다
+        if m:
+            tok = m.group(1)
+            n = int(tok) if tok.isdigit() else _KOR_DIGIT[tok]
+            return now_year - n, m.group(0), now_year
+        for word, back in _REL_WORDS:
+            if word in q:
+                return now_year - back, word, now_year
+        return None, "", now_year
+    except Exception:                          # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        return None, "", now_year
 
 
 def clip_fiscal_years(years) -> tuple:
@@ -245,14 +292,12 @@ def build_prompt() -> str:
         "  명확히 다시 쓴 것을 넣는다. 질문이 하나면 sub_questions 도 1개다",
         "- '올해·최근·현재' 는 오늘 날짜가 아니라 코퍼스에서 확인 가능한 가장 최근",
         "  시점(2026년 3월 접수분까지)으로 해석한다. 해석 근거를 time_note 에 적는다",
-        "- '작년 매출' 처럼 연도가 상대적이면 회계연도로 환산한다.",
-        "  2025 회계연도 사업보고서는 2026년 3월에 접수된다는 점에 주의하라",
         "- 질문에 연도가 명시돼 있으면(예: '2024년') **그 연도를 그대로** 쓴다.",
-        "  상대 표현('작년·올해·최근')일 때만 환산한다. 명시된 연도를 바꾸지 마라",
+        "  명시된 연도를 바꾸지 마라",
         "- companies: 위 목록의 법인명으로 정규화한다. '전체·모든·상장사' 류는",
         "  회사가 아니므로 companies 를 [] 로 둔다",
-        "- fiscal_years: 질문에 명시됐거나('2024년') '작년'처럼 특정 연도로 환산되는",
-        "  회계연도(정수)만. 시점이 열려 있는 질문('최신·최종·현재·작성기준일 이후·",
+        "- fiscal_years: 질문에 명시된('2024년') 회계연도(정수)만.",
+        "  시점이 열려 있는 질문('최신·최종·현재·작성기준일 이후·",
         "  이력·정리·현황')은 **비워라** — 연도를 걸면 다른 해의 건이 통째로 빠진다(실측)",
         "- '제50기' 같은 기수는 연도로 환산하지 말고 fiscal_years 에도 넣지 마라.",
         "  rewritten 에 '제50기' 표현을 그대로 남겨라 — 검색이 본문에서 기수를 찾는다",
@@ -401,6 +446,13 @@ def rewrite_question(question, model=None, budget_s=None) -> dict:
         # 기수는 rewritten 문장에 남아 검색어로 흘러간다.
         a["fiscal_years"] = [y for y in (a.get("fiscal_years") or []) if y >= 1900]
         a["ki"] = []
+        # 상대 연도('작년·올해·N년 전')는 코드가 환산해 재작성 값을 **덮어쓴다**
+        # (step65). 결과가 범위 밖이면 바로 아래 clip 이 처리한다.
+        # rel_year 는 _DEFAULTS 에 없어 LLM 주입이 안 되고, think_trace 비고에만 쓴다.
+        _ry, _rw, _rb = resolve_relative_year(q)
+        if _ry is not None:
+            a["fiscal_years"] = [_ry]
+            a["rel_year"] = {"word": _rw, "year": _ry, "base": _rb}
         # 코퍼스 범위 밖 연도(2026 이상 · 2022 이하)는 버리고 안내를 남긴다.
         # range_note 는 **코드만 채운다** — _DEFAULTS 에 없으므로 LLM 이 넣어도
         # _parse 에서 이미 버려졌다. 여기서 무조건 덮어쓴다.

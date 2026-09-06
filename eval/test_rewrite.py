@@ -484,8 +484,11 @@ try:
     rw3 = R.rewrite_question("SK하이닉스 작년 실적")
 finally:
     clova.chat = real_chat
-check("'작년' 은 환산 결과를 그대로 둔다",
-      rw3["analysis"]["fiscal_years"] == [2024],
+# 【step65 갱신】 예전엔 재작성 환산([2024])을 그대로 뒀지만, 이제 '작년' 은
+# 코드가 now_year-1 로 덮어쓴다 — 재작성이 두 해를 민 실측 사고가 근거다.
+_now53 = __import__("datetime").datetime.now().year
+check("'작년' 은 코드 환산(now-1)으로 덮어쓴다 (step65)",
+      rw3["analysis"]["fiscal_years"] == [_now53 - 1],
       str(rw3["analysis"]["fiscal_years"]))
 
 # (g) 범위 밖 연도 안내(step52)와 함께 와도 둘 다 남는다
@@ -524,6 +527,84 @@ _tr2 = _trace({"rewritten": "재작성문", "companies": ["삼성전자"],
                "fiscal_years": [2024], "time_note": ""})
 check("range_note 가 없으면 그 줄도 없다", "시점: " not in _tr2, _tr2[:220])
 check("연도는 그대로 실린다", "회계연도 2024" in _tr2, _tr2[:220])
+
+print()
+print("=" * 74)
+print("5-H — 상대 연도를 코드가 환산한다 (step65)")
+print("=" * 74)
+
+# (a) now_year=2026 고정 — 지시 명세 그대로
+for _q, _want in [("작년 영업이익", 2025), ("재작년 매출", 2024),
+                  ("지난해 실적", 2025), ("2년 전 매출", 2024),
+                  ("이년 전 매출", 2024), ("올해 실적", 2026)]:
+    _y, _w, _b = R.resolve_relative_year(_q, now_year=2026)
+    check(f"환산(2026 기준): {_q} → {_want}", _y == _want and _b == 2026,
+          f"{_y} ({_w})")
+_y, _w, _b = R.resolve_relative_year("2024년 매출", now_year=2026)
+check("명시 연도('2024년')는 건드리지 않는다", _y is None)
+check("'전년 대비 2024년 증가율' 도 건드리지 않는다",
+      R.resolve_relative_year("전년 대비 2024년 증가율", now_year=2026)[0] is None)
+check("'제77기' 도 건드리지 않는다",
+      R.resolve_relative_year("제77기 매출", now_year=2026)[0] is None)
+
+# (b) now_year=2027 이면 전부 1씩 민다
+for _q, _want in [("작년 영업이익", 2026), ("재작년 매출", 2025),
+                  ("2년 전 매출", 2025), ("올해 실적", 2027)]:
+    check(f"환산(2027 기준): {_q} → {_want}",
+          R.resolve_relative_year(_q, now_year=2027)[0] == _want)
+
+check("now_year 미지정이면 datetime 을 쓴다(하드코딩 아님)",
+      R.resolve_relative_year("작년 매출")[2]
+      == __import__("datetime").datetime.now().year)
+check("빈 입력·None 에 예외 없음",
+      R.resolve_relative_year(None)[0] is None
+      and R.resolve_relative_year("")[0] is None)
+
+# (c) rewrite_question 통과 — 재작성이 틀리게 채운 [2024] 를 [2025] 로 덮어쓴다
+REL_JSON = json.dumps(dict(json.loads(GOOD_JSON), fiscal_years=[2024], ki=[]),
+                      ensure_ascii=False)
+fake, st = make_chat({"ok": True, "text": REL_JSON, "tool_calls": [], "usage": {}})
+clova.chat = fake
+try:
+    rwrel = R.rewrite_question("삼성전자 작년 영업이익")
+finally:
+    clova.chat = real_chat
+_now = __import__("datetime").datetime.now().year
+check("재작성의 틀린 환산을 코드가 덮어쓴다",
+      rwrel["analysis"]["fiscal_years"] == [_now - 1],
+      str(rwrel["analysis"]["fiscal_years"]))
+check("rel_year 가 기록된다(비고용)",
+      (rwrel["analysis"].get("rel_year") or {}).get("word") == "작년")
+_blkrel = R.analysis_block(rwrel["analysis"])
+# time_note 는 LLM 출력이라 '기준' 같은 낱말이 들어올 수 있다(픽스처에도 있다).
+# 계약은 **코드가** 블록에 환산 설명을 더하지 않는 것 — 회계연도 줄이 값뿐인지,
+# 코드가 만드는 '상대 연도 환산' 문구가 없는지를 본다.
+check("[질문 분석] 에는 결과만 — 코드가 환산 설명을 더하지 않는다",
+      ("- 회계연도: %d" % (_now - 1)) in _blkrel
+      and "상대 연도 환산" not in _blkrel, _blkrel[:200])
+_trrel = S.render_trace({"rewrite": rwrel, "tool_calls": [], "documents": [],
+                         "sources": [], "answer": "x"})
+check("비고 줄에만 환산 기록",
+      f"상대 연도 환산: 작년 → {_now - 1} (기준 {_now})" in _trrel, _trrel[-120:])
+check("비고 이전 줄들에는 환산 설명이 없다",
+      "상대 연도 환산" not in _trrel.split("비고:")[0], _trrel[:150])
+
+# (d) '올해' → 2026(분기만 있는 해) → clip 이 이어받는다
+fake, st = make_chat({"ok": True, "text": REL_JSON, "tool_calls": [], "usage": {}})
+clova.chat = fake
+try:
+    rwol = R.rewrite_question("삼성전자 올해 실적")
+finally:
+    clova.chat = real_chat
+check("'올해'(2026)는 clip 으로 넘어가 비워지고 분기 안내가 남는다",
+      rwol["analysis"]["fiscal_years"] == []
+      and "연간 실적이 없다" in (rwol["analysis"].get("range_note") or ""),
+      str((rwol["analysis"]["fiscal_years"], rwol["analysis"].get("range_note"))))
+
+# (e) 재작성 프롬프트에 '작년 환산' 문구·날짜가 없다
+_pmt = R._prompt() if hasattr(R, "_prompt") else ""
+check("rel_year 는 LLM 주입이 안 된다(_DEFAULTS 밖)",
+      "rel_year" not in R._DEFAULTS)
 
 print()
 print("=" * 74)
