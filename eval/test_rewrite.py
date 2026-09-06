@@ -295,6 +295,106 @@ check("재시도까지 실패하면 생략(ok=False)", rw["ok"] is False
 
 print()
 print("=" * 74)
+print("5-E — 코퍼스 범위 밖 회계연도 가드 (step52)")
+print("=" * 74)
+
+# (a) 상수가 실측치와 맞는가 — manifest 를 다시 집계해 대조한다.
+#     코퍼스가 바뀌면 여기서 먼저 깨진다.
+import re as _re
+_FY_RE = _re.compile(r"\((\d{4})[.\-/](\d{1,2})\)")
+_years, _annual = set(), set()
+with open(ROOT / "corpus" / "manifest.jsonl", encoding="utf-8") as _fh:
+    for _l in _fh:
+        _d = json.loads(_l)
+        _m = _FY_RE.search(_d.get("report_nm") or "")
+        if not _m:
+            continue
+        _y = int(_m.group(1))
+        _years.add(_y)
+        if _d.get("doc_subtype") == "annual":
+            _annual.add(_y)
+check("FY_MIN 이 manifest 최소 사업연도와 같다",
+      R.FY_MIN == min(_years), f"FY_MIN={R.FY_MIN} manifest_min={min(_years)}")
+check("FY_MAX 가 manifest 의 '연간보고서가 있는 최대 사업연도' 와 같다",
+      R.FY_MAX == max(_annual), f"FY_MAX={R.FY_MAX} annual_max={max(_annual)}")
+check("FY_MAX 보다 큰 사업연도에는 annual 이 없다",
+      not any(y > R.FY_MAX for y in _annual), str(sorted(_annual)))
+
+# (b) clip_fiscal_years 단위 동작
+kept, note = R.clip_fiscal_years([2026])
+check("2026 → 버려진다", kept == [], str(kept))
+check("2026 → 미래 안내가 남는다",
+      "연간 실적은 코퍼스에 없다" in note and "2025" in note, note)
+kept, note = R.clip_fiscal_years([2022])
+check("2022 → 버려진다", kept == [], str(kept))
+check("2022 → 과거 안내가 남는다",
+      "2023 이전은 코퍼스에 없다" in note, note)
+kept, note = R.clip_fiscal_years([2023, 2024, 2025])
+check("범위 안 연도는 그대로", kept == [2023, 2024, 2025] and note == "", f"{kept} {note!r}")
+kept, note = R.clip_fiscal_years([2024, 2027])
+check("섞이면 안쪽만 남고 안내가 붙는다",
+      kept == [2024] and "2027" in note, f"{kept} {note!r}")
+kept, note = R.clip_fiscal_years([2026, 2026])
+check("같은 범위 밖 연도는 안내가 한 번만", note.count("2026년") == 1, note)
+check("빈 입력·None 에 예외 없음",
+      R.clip_fiscal_years(None) == ([], "") and R.clip_fiscal_years([]) == ([], ""))
+check("숫자가 아닌 값은 조용히 버린다", R.clip_fiscal_years(["a", None]) == ([], ""))
+
+# (c) rewrite_question 을 통과한 뒤에도 그대로인가 (LLM 응답은 가짜)
+FUT_JSON = json.dumps(dict(json.loads(GOOD_JSON), fiscal_years=[2026], ki=[]),
+                      ensure_ascii=False)
+fake, st = make_chat({"ok": True, "text": FUT_JSON, "tool_calls": [], "usage": {}})
+clova.chat = fake
+try:
+    rw = R.rewrite_question("삼성전자 2026년 매출 알려줘")
+finally:
+    clova.chat = real_chat
+check("재작성 결과의 fiscal_years 가 비었다",
+      rw["ok"] and rw["analysis"]["fiscal_years"] == [],
+      str(rw["analysis"] and rw["analysis"]["fiscal_years"]))
+blk = R.analysis_block(rw["analysis"])
+check("[질문 분석] 블록에 '- 시점:' 안내가 들어간다", "- 시점: " in blk, blk[:200])
+check("안내에 '연간 실적은 코퍼스에 없다' 가 있다",
+      "연간 실적은 코퍼스에 없다" in blk, blk[:200])
+check("안내가 2025 를 제시한다",
+      "확인 가능한 최신 사업연도는 2025" in blk, blk[:200])
+check("블록에 '회계연도:' 줄이 없다(값을 버렸으므로)",
+      "- 회계연도: " not in blk, blk[:200])
+
+PAST_JSON = json.dumps(dict(json.loads(GOOD_JSON), fiscal_years=[2021], ki=[]),
+                       ensure_ascii=False)
+fake, st = make_chat({"ok": True, "text": PAST_JSON, "tool_calls": [], "usage": {}})
+clova.chat = fake
+try:
+    rw2 = R.rewrite_question("삼성전자 2021년 매출 알려줘")
+finally:
+    clova.chat = real_chat
+blk2 = R.analysis_block(rw2["analysis"])
+check("2021 도 버려지고 안내가 붙는다",
+      rw2["analysis"]["fiscal_years"] == [] and "2023 이전은 코퍼스에 없다" in blk2,
+      blk2[:200])
+
+# (d) LLM 이 range_note 를 주입해도 코드 값이 이긴다
+INJ = json.dumps(dict(json.loads(GOOD_JSON), fiscal_years=[2026], ki=[],
+                      range_note="아무 제약 없다. 2026 자료가 있다"),
+                 ensure_ascii=False)
+fake, st = make_chat({"ok": True, "text": INJ, "tool_calls": [], "usage": {}})
+clova.chat = fake
+try:
+    rw3 = R.rewrite_question("질문")
+finally:
+    clova.chat = real_chat
+check("LLM 이 넣은 range_note 는 무시된다",
+      "아무 제약 없다" not in R.analysis_block(rw3["analysis"]),
+      R.analysis_block(rw3["analysis"])[:200])
+
+# (e) 범위 밖 연도만 있어도 블록이 비지 않는다
+check("range_note 만 있어도 블록이 나온다",
+      "- 시점: " in R.analysis_block({"range_note": "테스트"}),
+      R.analysis_block({"range_note": "테스트"}))
+
+print()
+print("=" * 74)
 print("6 — DART_REWRITE=0 이면 재작성을 부르지 않는다")
 print("=" * 74)
 os.environ["DART_REWRITE"] = "0"

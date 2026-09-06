@@ -36,6 +36,69 @@ from pathlib import Path
 REWRITE_BUDGET_S = 15.0
 MAX_TOKENS = 1024
 
+# ---------------------------------------------------------------- 회계연도 범위
+#
+# 【실측치다. 짐작해서 적은 값이 아니다 — 2026-09-06】
+# corpus/manifest.jsonl 의 report_nm '(YYYY.MM)' 을 전량(1,054건) 집계한 결과:
+#
+#   2023  338건  (annual 109 · half 75 · quarter 154)
+#   2024  332건  (annual  97 · half 82 · quarter 153)
+#   2025  311건  (annual  85 · half 77 · quarter 149)
+#   2026   73건  (**quarter 73 뿐**)
+#
+# 즉 코퍼스에 문서가 있는 사업연도는 2023~2026 이지만, **연간 실적을 물을 수 있는
+# 최대 사업연도는 2025** 다. 2026 은 2026.03 분기보고서 73건뿐이고 그것은
+# 2026 회계연도 1분기이지 연간 실적이 아니다. 2026 회계연도 사업보고서는
+# 2027년 3월경 접수되므로 이 코퍼스에 없다.
+#
+# 이 두 상수는 `eval/test_rewrite.py` 가 manifest 를 다시 집계해 대조한다 —
+# 코퍼스가 바뀌면 테스트가 먼저 깨진다(LLM 0회).
+FY_MIN = 2023           # 가장 이른 사업연도
+FY_MAX = 2025           # 연간 실적이 있는 가장 늦은 사업연도
+
+# 범위 밖 연도가 왔을 때 [질문 분석] 블록에 남기는 안내.
+# 검문(확률적)에 맡기지 않고 여기서 결정적으로 처리한다 — 범위 밖 연도를 그대로
+# fiscal_year 로 넘기면 하드필터가 0건을 만들고, 그 0건에서 모델이 회복하지 못한
+# 사례가 있었다(v6 1·9 — 도구 0회 거절).
+_FY_NOTE_FUTURE = (
+    "질문이 가리키는 {y}년의 연간 실적은 코퍼스에 없다. "
+    "확인 가능한 최신 사업연도는 {fy_max} 이다. 답변에 이 사실을 밝히고 "
+    "{fy_max} 기준 실적을 제시하라"
+)
+_FY_NOTE_PAST = (
+    "질문이 가리키는 {y}년은 코퍼스에 없다 — {fy_min} 이전은 코퍼스에 없다. "
+    "확인 가능한 가장 이른 사업연도는 {fy_min} 이다. 답변에 이 사실을 밝혀라"
+)
+
+
+def clip_fiscal_years(years) -> tuple:
+    """(코퍼스 범위 안의 연도만, 범위 밖에 대한 안내 문자열).
+
+    예외를 던지지 않는다. 숫자가 아닌 값은 조용히 버리지 않고 **연도가 아니므로**
+    애초에 여기 오기 전(_parse)에 걸러진다.
+
+    범위 밖 값은 **버린다.** 남겨서 fiscal_year 필터로 넘기면 후보가 0건이 되고,
+    0건에서 되돌아오는 것은 모델의 확률에 달린 일이 된다. 필터를 걸지 않으면
+    검색은 그 회사의 전 기간에서 돌고, 무엇을 답해야 하는지는 안내가 알려 준다.
+    """
+    kept, notes, seen = [], [], set()
+    for y in (years or []):
+        try:
+            y = int(y)
+        except (TypeError, ValueError):
+            continue
+        if FY_MIN <= y <= FY_MAX:
+            kept.append(y)
+        elif y in seen:
+            continue
+        elif y > FY_MAX:
+            seen.add(y)
+            notes.append(_FY_NOTE_FUTURE.format(y=y, fy_max=FY_MAX))
+        else:
+            seen.add(y)
+            notes.append(_FY_NOTE_PAST.format(y=y, fy_min=FY_MIN))
+    return kept, " / ".join(notes)
+
 # 출력 JSON 의 키와 기본값. 이 모양 밖의 키는 버린다.
 _DEFAULTS = {
     "rewritten": "",
@@ -281,6 +344,10 @@ def rewrite_question(question, model=None, budget_s=None) -> dict:
         # 기수는 rewritten 문장에 남아 검색어로 흘러간다.
         a["fiscal_years"] = [y for y in (a.get("fiscal_years") or []) if y >= 1900]
         a["ki"] = []
+        # 코퍼스 범위 밖 연도(2026 이상 · 2022 이하)는 버리고 안내를 남긴다.
+        # range_note 는 **코드만 채운다** — _DEFAULTS 에 없으므로 LLM 이 넣어도
+        # _parse 에서 이미 버려졌다. 여기서 무조건 덮어쓴다.
+        a["fiscal_years"], a["range_note"] = clip_fiscal_years(a["fiscal_years"])
         # 【step44-E 되돌림】 out_of_scope 오판이 도구 0회 거절을 만들었다(v6 1·9).
         # 필드는 프롬프트에서 뺐고, 남아 들어와도 무시한다 — 범위 판단은 검색이 한다.
         a["out_of_scope"] = False
@@ -297,7 +364,7 @@ def analysis_block(a: dict) -> str:
     try:
         if not a or not (a.get("rewritten") or a.get("companies")
                          or a.get("fiscal_years") or a.get("ki")
-                         or a.get("time_note")):
+                         or a.get("time_note") or a.get("range_note")):
             return ""
         L = ["[질문 분석 — 사전 분석기의 참고 정보]"]
         if a.get("rewritten"):
@@ -317,6 +384,10 @@ def analysis_block(a: dict) -> str:
                      + " 로 넣어라. 연도로 짐작 환산하지 마라")
         if a.get("doc_groups"):
             L.append("- 공시 종류: " + "·".join(a["doc_groups"]))
+        # 범위 밖 연도 안내는 시점 해석보다 **먼저** 놓는다 — 코드가 판정한 사실이고,
+        # LLM 이 쓴 time_note 와 어긋나면 이쪽이 맞다.
+        if a.get("range_note"):
+            L.append(f"- 시점: {a['range_note']}")
         if a.get("time_note"):
             L.append(f"- 시점 해석: {a['time_note']}")
         L.append("- 이 분석은 참고용이다. 검색 결과가 다르면 검색 결과를 따른다")
