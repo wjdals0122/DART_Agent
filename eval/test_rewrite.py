@@ -323,8 +323,19 @@ check("FY_MAX 보다 큰 사업연도에는 annual 이 없다",
 # (b) clip_fiscal_years 단위 동작
 kept, note = R.clip_fiscal_years([2026])
 check("2026 → 버려진다", kept == [], str(kept))
-check("2026 → 미래 안내가 남는다",
-      "연간 실적은 코퍼스에 없다" in note and "2025" in note, note)
+# step57 — 2026 은 분기보고서가 있다. 문구를 나눈다
+check("2026 → '연간 실적이 없다' 로 말한다",
+      "연간 실적이 없다" in note, note)
+check("2026 → 분기 조회 방법을 알려준다",
+      "report_type='quarter'" in note and "2026.03 분기보고서" in note, note)
+check("2026 → 연간을 물었으면 2025 로 답하라고 한다",
+      "연간을 물었다면 2025 기준으로 답하라" in note, note)
+check("FY_MAX_QUARTER 가 실측(2026)과 같다", R.FY_MAX_QUARTER == 2026,
+      str(R.FY_MAX_QUARTER))
+kept, note = R.clip_fiscal_years([2027])
+check("2027 → 분기도 없으므로 기존 미래 안내",
+      kept == [] and "연간 실적은 코퍼스에 없다" in note
+      and "report_type" not in note, note)
 kept, note = R.clip_fiscal_years([2022])
 check("2022 → 버려진다", kept == [], str(kept))
 check("2022 → 과거 안내가 남는다",
@@ -354,10 +365,10 @@ check("재작성 결과의 fiscal_years 가 비었다",
       str(rw["analysis"] and rw["analysis"]["fiscal_years"]))
 blk = R.analysis_block(rw["analysis"])
 check("[질문 분석] 블록에 '- 시점:' 안내가 들어간다", "- 시점: " in blk, blk[:200])
-check("안내에 '연간 실적은 코퍼스에 없다' 가 있다",
-      "연간 실적은 코퍼스에 없다" in blk, blk[:200])
-check("안내가 2025 를 제시한다",
-      "확인 가능한 최신 사업연도는 2025" in blk, blk[:200])
+check("안내에 '연간 실적이 없다' 가 있다",
+      "연간 실적이 없다" in blk, blk[:200])
+check("안내가 분기 조회와 2025 를 함께 제시한다",
+      "report_type='quarter'" in blk and "2025 기준으로 답하라" in blk, blk[:200])
 check("블록에 '회계연도:' 줄이 없다(값을 버렸으므로)",
       "- 회계연도: " not in blk, blk[:200])
 
@@ -411,8 +422,12 @@ for _q in ["2024년 매출",
            "제77기 영업이익",
            "작년 실적",
            "삼성전자 매출은?",
-           "올해 영업이익"]:
+           "올해 영업이익",
+           "삼성전자 임원 현황은?",          # step56 — '현황' 을 낱말에서 뺐다
+           "SK하이닉스 지분 변동 알려줘"]:   # step56 — '변동' 을 낱말에서 뺐다
     check(f"유지 판정: {_q}", R.is_multi_period(_q) is False)
+check("'지분율 변동 이력' 은 '이력' 으로 여전히 비움",
+      R.is_multi_period("지분율 변동 이력 정리해줘") is True)
 
 # (c) 연도·기수가 함께 있으면 낱말이 있어도 유지한다
 check("'2024년 최근 현황' → 연도가 있으므로 유지",
@@ -485,6 +500,30 @@ finally:
 blk4 = R.analysis_block(rw4["analysis"])
 check("범위 밖 안내와 여러 시점 안내가 함께 남는다",
       "2027년" in blk4 and "여러 시점에 걸친 질문이다" in blk4, blk4[:300])
+
+print()
+print("=" * 74)
+print("5-G — think_trace 에 range_note 가 실린다 (step58)")
+print("=" * 74)
+
+
+def _trace(analysis):
+    return S.render_trace({"rewrite": {"ok": True, "analysis": analysis},
+                           "tool_calls": [], "documents": [], "sources": [],
+                           "answer": "x"})
+
+
+_tr = _trace({"rewritten": "재작성문", "companies": ["삼성전자"],
+              "fiscal_years": [], "time_note": "LLM 이 쓴 해석",
+              "range_note": "여러 시점에 걸친 질문이다"})
+check("think_trace 에 '시점: ' 이 실린다", "시점: 여러 시점에 걸친 질문이다" in _tr, _tr[:220])
+check("time_note 도 함께 실린다", "시점 해석: LLM 이 쓴 해석" in _tr, _tr[:220])
+check("range_note 가 time_note 보다 앞이다",
+      _tr.index("시점: 여러") < _tr.index("시점 해석:"), _tr[:220])
+_tr2 = _trace({"rewritten": "재작성문", "companies": ["삼성전자"],
+               "fiscal_years": [2024], "time_note": ""})
+check("range_note 가 없으면 그 줄도 없다", "시점: " not in _tr2, _tr2[:220])
+check("연도는 그대로 실린다", "회계연도 2024" in _tr2, _tr2[:220])
 
 print()
 print("=" * 74)

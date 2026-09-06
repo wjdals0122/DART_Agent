@@ -195,6 +195,11 @@ def render_trace(res: dict) -> str:
             bits.append("회사 " + "·".join(a["companies"]))
         if a.get("fiscal_years"):
             bits.append("회계연도 " + "·".join(str(y) for y in a["fiscal_years"]))
+        # 코드가 판정한 시점 제약(범위 밖 연도·여러 시점 질문)은 LLM 이 쓴
+        # time_note 보다 **앞**에 싣는다. think_trace 는 채점 필드다 —
+        # 왜 연도 필터를 빼거나 다른 해로 답했는지가 여기서 보여야 한다.
+        if a.get("range_note"):
+            bits.append(f"시점: {a['range_note']}")
         if a.get("time_note"):
             bits.append(f"시점 해석: {a['time_note']}")
         out.append(f"{n}. 질문 분석: " + (" · ".join(bits) or "특이사항 없음"))
