@@ -180,6 +180,30 @@ check("'000,000,000' 도 제거된다",
 check("PLACEHOLDERS 에 두 자리표시자가 있다",
       "제NN기" in _L.PLACEHOLDERS and "000,000,000" in _L.PLACEHOLDERS)
 
+# step62 — 3개년 지시를 REMINDER 로 옮겼다(도구 결과 직후). system.txt 의
+# [시점 해석] 절과 **같은 말**을 해야 한다 — 어긋나면 어느 쪽도 안 지켜진다.
+_SYS = _L.build_system("")
+_SAME = [
+    "질문에 연도가 없어 최근 3개 사업연도를 함께 제시했습니다",
+    "질문에 연도나 '제N기' 가 명시",
+    "목록·서술형 질문",
+]
+for _phrase in _SAME:
+    check(f"step62 — REMINDER 에 있다: {_phrase[:22]}", _phrase in _L.REMINDER)
+    check(f"step62 — system.txt 에도 있다: {_phrase[:22]}", _phrase in _SYS)
+check("step62 — REMINDER 가 단일 수치 조건을 말한다",
+      "단일 수치(매출·영업이익·순이익 등)" in _L.REMINDER)
+check("step62 — REMINDER 가 '최근 3개 사업연도를 모두 제시' 를 말한다",
+      "최근 3개 사업연도를 모두 제시" in _L.REMINDER)
+check("step62 — REMINDER 에 실제 접수번호가 없다",
+      not __import__("re").search(r"(?<!\d)\d{14}(?!\d)", _L.REMINDER))
+check("step62 — REMINDER 에 자리표시자 수치가 없다",
+      "000,000,000" not in _L.REMINDER and "제NN기" not in _L.REMINDER)
+check("step62 — 기존 REMINDER 지시가 그대로 남아 있다",
+      "위 자료만으로 답하라." in _L.REMINDER
+      and "calculate 도구를 부른다" in _L.REMINDER
+      and "확인 가능한 관련 정보:" in _L.REMINDER)
+
 print()
 print("=" * 74)
 if FAIL:
