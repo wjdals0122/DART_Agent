@@ -6214,3 +6214,78 @@ kiwipiepy >=0.20 ← 0.23.2   uvicorn >=0.30 ← 0.52.4
   `pandas==3.0.5`·`scipy==1.17.1` 로 못 박는다" 를 적어 두었다
 
 LLM 호출 0회.
+
+---
+
+## step51 — requirements-server.txt · Docker 미제공 명시 · 마감일 정정 (2026-09-06)
+
+코드는 동결. 문서·설정 파일만.
+
+### [1] `requirements-server.txt` 신규 — 17개 고정
+
+**`requirements.txt` 는 건드리지 않았다.** 개발 PC 의 pandas 2.3.0 ·
+torch 2.7.1+cu118 임베딩 환경이 깨진다(`pip install -U` 금지 규칙과 충돌).
+
+서버 freeze 82개 중 **직접 의존성 17개만** 골랐다. 고른 기준은
+`src/` 를 AST 로 훑어 나온 직접 import **15개**
+(FlagEmbedding · dotenv · fastapi · huggingface_hub · kiwipiepy · numpy ·
+orjson · pandas · psutil · pyarrow · requests · scipy · torch · uvicorn · yaml)
+\+ `lxml`(src 밖 — `parser/`·`scripts/` 가 쓴다) + `kiwipiepy_model`
+(kiwipiepy 가 `kiwipiepy_model<0.24,>=0.23` 으로 요구).
+
+**안 넣은 것**: transformers 5.16.1 · sentence-transformers 6.0.1 ·
+datasets 5.0.1 · pydantic 2.13.5 · starlette 1.6.0 등. 위 17개가 끌고 오는
+것이라 전부 박으면 다른 파이썬 버전에서 설치가 깨진다.
+
+전 항목을 freeze 원본과 대조했다 — **17/17 일치 · 파싱 오류 0**.
+
+```
+numpy 1.26.4 · scipy 1.17.1 · pandas 3.0.5 · pyarrow 25.0.1
+FlagEmbedding 1.4.2 · huggingface_hub 1.29.0 · torch 2.14.0+cpu
+kiwipiepy 0.23.2 · kiwipiepy_model 0.23.0
+lxml 6.1.3 · PyYAML 6.0.3 · orjson 3.12.0
+python-dotenv 1.2.3 · requests 2.34.2
+uvicorn 0.52.4 · fastapi 0.141.1 · psutil 7.2.2
+```
+
+torch 는 지시대로 주석으로만 안내했다 —
+`--index-url https://download.pytorch.org/whl/cpu` 로 설치해야 CPU 빌드가 잡힌다.
+
+`README.md` 에 두 파일의 성격을 표로 넣고, **개발 PC 에 server 파일을 쓰지 말라**는
+경고를 달았다. 버전 표도 17개 전부로 늘렸다 — step50 에서 freeze 발췌가 10줄이라
+"확인 불가" 로 남겼던 `lxml` `PyYAML` `orjson` `python-dotenv` `requests` 를
+이번에 채웠다. **`python-dotenv` 가 로컬 0.21.0 → 서버 1.2.3 으로 가장 크게
+벌어져 있었다**(requirements 하한 `>=0.21` 은 만족).
+
+### [2] Dockerfile — 만들지 않았다
+
+`README.md` 환경 구성 절에 명시했다. 컨테이너를 쓰지 않고
+Ubuntu 24.04 + venv + systemd 로 구성했으며, **검증하지 못한 빌드 정의를
+제출하지 않기 위해** Dockerfile 을 제공하지 않는다.
+
+### [3] 마감일 정정 — 실제 마감은 2026-09-06
+
+`HANDOFF.md` 가 "9/7 15:00 사전점검 / 9/8 12:00 제출 마감 / 9/9 15:00 종료" 로
+적고 있었다. **틀린 일정이다.** 3곳(20행 머리말 · 44행 일정표 · 327행 B절)을
+고치고 옛 줄은 취소선으로 남겼다 — 지웠다가 다시 그 일정으로 계산하면 안 되므로.
+비용 절의 "9/9 까지 총 예상" 도 "마감(2026-09-06)까지" 로 바꿨다.
+
+**제출물(README·API.md·proposal.md)에는 9/7·9/8·9/9 언급이 애초에 없었다**(확인).
+
+겸사겸사 `HANDOFF.md` 10-A 절의 옛 문장 **"fastapi 가 있으면 그쪽을 쓴다 —
+응답과 상태코드는 완전히 같다"** 도 고쳤다. 15절이 이미 "그건 틀렸다" 로
+정정해 놓았는데 10절이 옛말을 그대로 들고 있어 서로 어긋났다.
+
+### [4] proposal 6장 — 미측정을 명시
+
+`### 6.5 측정하지 못한 것` 을 새로 넣고 비용을 6.6 으로 밀었다.
+
+> step45~47(되돌림·대조 제거·PER_DOC 조정) 이후 판의 40문항 정답률은 잔여 기간
+> 제약으로 측정하지 못했다. 회귀 스위트 7문항에서 7/7, 개별 검증에서 환각 3건
+> 소멸을 확인했으나 40문항 규모의 효과는 미측정이다.
+
+6.2 의 정답률(v5 25% · v6 22.5%)이 **step44 시점 수치**이며 현재 배포판의
+정답률이 아니라는 것, 그리고 **이 문서 어디에서도 그 이후를 추정하지 않는다**는
+것을 함께 적었다.
+
+LLM 호출 0회.

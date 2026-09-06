@@ -52,14 +52,36 @@ LLM은 과제 제약에 따라 HyperCLOVA X만 쓰고, 임베딩은 로컬 GPU�
 | 항목 | 값 |
 |---|---|
 | Python | **3.12** |
-| 운영 서버 | Ubuntu · 4 vCPU · 16GB RAM · **GPU 없음** (CPU로 동작) |
+| 운영 서버 | **Ubuntu 24.04** · 4 vCPU · 16GB RAM · **GPU 없음** (CPU로 동작) |
 | 개발/색인 | RTX 4090 24GB × 4 · Xeon Gold 6326 · RAM 384GB |
+
+> **본 프로젝트는 컨테이너를 사용하지 않는다.** 운영 서버는
+> Ubuntu 24.04 + Python venv + systemd 로 구성했으며, 재현에 필요한 것은
+> `requirements-server.txt` 와 아래 절차다.
+> **Dockerfile 은 제공하지 않는다** — 배포 방식이 컨테이너가 아니며,
+> 검증하지 못한 빌드 정의를 제출하지 않기 위함이다.
+
+### 의존성 파일이 둘이다
+
+| 파일 | 성격 | 쓰는 곳 |
+|---|---|---|
+| `requirements.txt` | **하한 제약**(`>=`) | 개발·색인 환경 |
+| `requirements-server.txt` | **서버 실측 고정**(`==`) | 평가 서버 재현용 |
 
 ```bash
 python -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
+
+# 개발·색인 환경
 pip install -r requirements.txt
+
+# 평가 서버를 그대로 재현할 때 (CPU)
+pip install torch==2.14.0+cpu --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements-server.txt
 ```
+
+> **개발 PC에 `requirements-server.txt` 를 쓰지 마라.** `pandas` 2.3.0 → 3.0.5 ·
+> `torch` 2.7.1+cu118 → 2.14.0+cpu 로 바뀌어 임베딩 환경이 깨진다.
 
 ### 실제 서비스 환경 버전 (서버 venv `pip freeze` 실측, 2026-09-06)
 
@@ -71,11 +93,24 @@ pip install -r requirements.txt
 | `pandas` | **3.0.5** | 2.3.0 |
 | `scipy` | **1.17.1** | 1.13.1 |
 | `numpy` | 1.26.4 | 1.26.0 |
-| `uvicorn` | 0.52.4 | 0.40.0 |
 | `pyarrow` | 25.0.1 | 25.0.1 |
 | `FlagEmbedding` | 1.4.2 | 1.4.2 |
+| `huggingface_hub` | 1.29.0 | 1.28.0 |
 | `kiwipiepy` (+ `kiwipiepy_model` 0.23.0) | 0.23.2 | 0.23.2 |
+| `lxml` | 6.1.3 | 5.2.1 |
+| `PyYAML` | 6.0.3 | 6.0.1 |
+| `orjson` | 3.12.0 | 3.11.6 |
+| `python-dotenv` | **1.2.3** | 0.21.0 |
+| `requests` | 2.34.2 | 2.32.3 |
+| `psutil` | 7.2.2 | 5.9.0 |
+| `uvicorn` | 0.52.4 | 0.40.0 |
 | `fastapi` | 0.141.1 (설치돼 있으나 **쓰이지 않는다** — 아래 참고) | 미설치 |
+
+서버 `pip freeze` 전체는 82개 패키지다. 위 17개가 이 프로젝트가 **직접
+import** 하는 것이고(`src/` AST 대조 + `parser/`·`scripts/`의 `lxml`),
+나머지는 이들이 끌고 오는 의존성이다(`transformers` 5.16.1 ·
+`sentence-transformers` 6.0.1 · `datasets` 5.0.1 · `pydantic` 2.13.5 등).
+`requirements-server.txt` 에는 **위 17개만** 고정했다.
 
 > **개발 PC와 서버의 버전이 다르다.** 특히 `pandas`(2.3.0 ↔ 3.0.5) ·
 > `scipy`(1.13.1 ↔ 1.17.1) · `torch`(CUDA ↔ CPU)가 메이저/마이너로 갈린다.
