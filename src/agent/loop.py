@@ -1541,6 +1541,46 @@ def _calc_transcribe_note(args, documents, question) -> str:
         return ""
 
 
+def _force_rel_fiscal_year(out, name, args) -> str:
+    """상대 연도가 환산된 문항에서 모델이 넘긴 fiscal_year 를 정정한다 (step68).
+
+    실측: "삼성전자 작년 영업이익" 에서 비고("작년 → 2025")·재작성문·[질문 분석]
+    **세 곳이 2025** 라고 말하는데 모델이 search_disclosure(fiscal_year=2024) 를
+    불렀다. 힌트로는 안 된다 — 도구 호출 직전에 코드가 덮어쓴다.
+
+    - fiscal_year 를 **안 넘겼으면 건드리지 않는다** (연도 없이 검색이 의도일 수 있다)
+    - hide_rewritten(여러 연도 질문)이면 적용하지 않는다 — 어느 해가 대상인지 모른다
+    - args 를 제자리에서 고치고, 정정했으면 note 문자열을 돌려준다(아니면 빈 문자열)
+    """
+    try:
+        if name not in ("search_disclosure", "list_disclosures"):
+            return ""
+        rw = out.get("rewrite") or {}
+        a = (rw.get("analysis") or {}) if rw.get("ok") else {}
+        rel = a.get("rel_year") or {}
+        if not rel or a.get("hide_rewritten") or not isinstance(args, dict):
+            return ""
+        v = args.get("fiscal_year")
+        if v in (None, ""):
+            return ""
+        if isinstance(v, list):                # 리스트로 오면 단일 값일 때만 판정
+            if len(v) != 1:
+                return ""
+            v = v[0]
+        try:
+            model_y, want = int(v), int(rel.get("year"))
+        except (TypeError, ValueError):
+            return ""
+        if model_y == want:
+            return ""
+        args["fiscal_year"] = want
+        return (f"fiscal_year 를 {model_y} → {want} 으로 정정했다. "
+                f"질문의 '{rel.get('word')}'은 {want} 회계연도다")
+    except Exception:                          # noqa: BLE001 — 정정이 답을 막으면 안 된다
+        traceback.print_exc(file=sys.stderr)
+        return ""
+
+
 def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> dict:
     from src.agent import clova
     from src.tools import TOOLS
@@ -1683,6 +1723,9 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
             name = ((call.get("function") or {}).get("name")) or ""
             args, err = _args_of(call)
             n_calls += 1
+            # 상대 연도 정정(step68)은 **캐시 키 계산보다 먼저** — 같은 오류 인자를
+            # 반복해도 정정된 인자로 한 키에 모인다. 기록되는 arguments 도 정정값이다.
+            rel_note = "" if err else _force_rel_fiscal_year(out, name, args)
 
             if err:
                 tool_out = {"status": "error", "note": err,
@@ -1720,6 +1763,13 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
 
             if tool_out.get("status") in ("error", "not_found"):
                 bad_tools.add(name)
+
+            # 상대 연도 정정 안내(step68) — 도구 결과 note 맨 앞에 붙인다.
+            # 모델이 "왜 2024 결과가 아니지" 하고 같은 호출을 반복하지 않게 한다.
+            if rel_note:
+                tool_out = dict(tool_out)
+                tool_out["note"] = rel_note + (
+                    " · " + tool_out["note"] if tool_out.get("note") else "")
 
             # calculate 입력 검증(1-C) — 계산은 그대로 두고 note 로만 짚는다
             if name == "calculate":

@@ -230,6 +230,81 @@ finally:
 
 print()
 print("=" * 74)
+print("상대 연도 fiscal_year 강제 (step68) — LLM·인덱스 0회")
+print("=" * 74)
+
+_REL68 = {"word": "작년", "year": 2025, "base": 2026}
+
+
+def _out68(rel=None, hide=False, ok=True):
+    a = {"rel_year": rel} if rel else {}
+    if hide:
+        a["hide_rewritten"] = True
+    return {"rewrite": {"ok": ok, "analysis": a}}
+
+
+# (a) rel=2025 · 모델 2024 → 덮어쓰고 note
+_ar = {"corp_name": "삼성전자", "fiscal_year": 2024, "query": "영업이익"}
+_nt = L._force_rel_fiscal_year(_out68(_REL68), "search_disclosure", _ar)
+check("step68 — 2024 → 2025 로 덮어쓴다", _ar["fiscal_year"] == 2025)
+check("step68 — note 에 정정 문구", "fiscal_year 를 2024 → 2025 으로 정정했다" in _nt
+      and "'작년'은 2025 회계연도다" in _nt, _nt)
+check("step68 — 다른 인자는 안 건드린다",
+      _ar["corp_name"] == "삼성전자" and _ar["query"] == "영업이익")
+
+# (b) rel=2025 · 모델 2025 → 그대로, note 없음
+_ar = {"fiscal_year": 2025}
+check("step68 — 이미 맞으면 note 없음",
+      L._force_rel_fiscal_year(_out68(_REL68), "search_disclosure", _ar) == ""
+      and _ar["fiscal_year"] == 2025)
+
+# (c) rel_year 없음 → 아무것도 안 함
+_ar = {"fiscal_year": 2024}
+check("step68 — rel_year 없으면 무동작",
+      L._force_rel_fiscal_year(_out68(None), "search_disclosure", _ar) == ""
+      and _ar["fiscal_year"] == 2024)
+
+# (d) fiscal_year 미지정 → 그대로 (연도 없이 검색이 의도일 수 있다)
+_ar = {"corp_name": "삼성전자"}
+check("step68 — 미지정이면 채우지 않는다",
+      L._force_rel_fiscal_year(_out68(_REL68), "search_disclosure", _ar) == ""
+      and "fiscal_year" not in _ar)
+
+# (e) hide_rewritten(여러 연도) → 적용 안 함
+_ar = {"fiscal_year": 2024}
+check("step68 — hide_rewritten 이면 무동작",
+      L._force_rel_fiscal_year(_out68(_REL68, hide=True),
+                               "search_disclosure", _ar) == ""
+      and _ar["fiscal_year"] == 2024)
+
+# (f) list_disclosures 에도 같은 처리
+_ar = {"fiscal_year": 2024}
+check("step68 — list_disclosures 도 정정",
+      "정정했다" in L._force_rel_fiscal_year(_out68(_REL68), "list_disclosures", _ar)
+      and _ar["fiscal_year"] == 2025)
+
+# (g) 대상 밖 도구·재작성 실패·이상한 값 — 전부 무동작·예외 없음
+_ar = {"fiscal_year": 2024}
+check("step68 — calculate 는 대상 밖",
+      L._force_rel_fiscal_year(_out68(_REL68), "calculate", _ar) == ""
+      and _ar["fiscal_year"] == 2024)
+_ar = {"fiscal_year": 2024}
+check("step68 — 재작성 실패 문항이면 무동작",
+      L._force_rel_fiscal_year(_out68(_REL68, ok=False),
+                               "search_disclosure", _ar) == "")
+check("step68 — 숫자 아닌 값·None 에 예외 없음",
+      L._force_rel_fiscal_year(_out68(_REL68), "search_disclosure",
+                               {"fiscal_year": "abc"}) == ""
+      and L._force_rel_fiscal_year(None, "search_disclosure", None) == "")
+check("step68 — 리스트 단일 값은 판정, 복수는 무동작",
+      (lambda a: (L._force_rel_fiscal_year(_out68(_REL68), "search_disclosure", a),
+                  a["fiscal_year"]))({"fiscal_year": [2024]})[1] == 2025
+      and (lambda a: (L._force_rel_fiscal_year(_out68(_REL68), "search_disclosure", a),
+                      a["fiscal_year"]))({"fiscal_year": [2023, 2024]})[1]
+      == [2023, 2024])
+
+print()
+print("=" * 74)
 if FAIL:
     print(f"{len(FAIL)}건 실패: " + ", ".join(FAIL))
     sys.exit(1)
