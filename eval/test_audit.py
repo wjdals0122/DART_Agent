@@ -834,6 +834,67 @@ check("검문10 — 메시지에 대상·답변 연도가 들어간다",
 
 print()
 print("=" * 74)
+print("검문 11 — 답변의 단위 표기가 원문과 다름 (step71)")
+print("=" * 74)
+
+from src.agent.loop import AUDIT_UNIT_MISMATCH, unit_mismatch  # noqa: E402
+
+_CH_CHEON = "(단위 : 천원)" + chr(10) + "| 매출액 | 575,548,870 | 500,000,000 |"
+_CH_BAEK = "(단위 : 백만원)" + chr(10) + "| 영업수익 | 300,870,903 | 258,935,494 |"
+
+
+def _docs71(*texts):
+    return [{"text": x} for x in texts]
+
+
+# 발동 3종 — 지시 명세 그대로
+check("검문11 발동 — 천원 → 원 (OCI 실측)",
+      unit_mismatch("OCI 매출은 575,548,870원입니다.", _docs71(_CH_CHEON))
+      == ("575,548,870", "원", "천원"))
+check("검문11 발동 — 백만원 → 원 (삼성전자 실측)",
+      unit_mismatch("매출은 300,870,903원이다.", _docs71(_CH_BAEK))
+      == ("300,870,903", "원", "백만원"))
+check("검문11 발동 — 백만원 → 천원",
+      unit_mismatch("매출은 300,870,903천원이다.", _docs71(_CH_BAEK))
+      == ("300,870,903", "천원", "백만원"))
+
+# 미발동 5종 — 지시 명세 그대로
+check("검문11 미발동 — 단위 일치",
+      unit_mismatch("매출은 300,870,903백만원이다.", _docs71(_CH_BAEK)) is None)
+check("검문11 미발동 — 환산 명시",
+      unit_mismatch("원으로 환산하면 575,548,870,000원이다.", _docs71(_CH_CHEON))
+      is None)
+check("검문11 미발동 — 표에 단위 표기 없음",
+      unit_mismatch("매출은 575,548,870원이다.",
+                    _docs71("| 매출액 | 575,548,870 |")) is None)
+check("검문11 미발동 — 같은 숫자가 여러 표에",
+      unit_mismatch("매출은 575,548,870원이다.",
+                    _docs71(_CH_CHEON,
+                            "(단위 : 백만원)" + chr(10)
+                            + "| x | 575,548,870 |")) is None)
+check("검문11 미발동 — 답변이 억원으로 환산",
+      unit_mismatch("매출은 3,008,709억원이다.", _docs71(_CH_BAEK)) is None)
+
+# 경계·안전
+check("검문11 — 표 밖 서술 문장의 숫자는 판정하지 않는다",
+      unit_mismatch("매출은 575,548,870원.",
+                    _docs71("(단위 : 천원)" + chr(10)
+                            + "서술 문장에 575,548,870 이 있다."))
+      is None)
+check("검문11 — 근거 절 이후는 제외",
+      unit_mismatch("매출입니다." + chr(10) * 2 + "근거" + chr(10)
+                    + "- [x 575,548,870원]", _docs71(_CH_CHEON)) is None)
+check("검문11 — 부분 일치는 안 잡는다(548,870 ⊄ 575,548,870)",
+      unit_mismatch("매출은 548,870원이다.", _docs71(_CH_CHEON)) is None)
+check("검문11 — None·이상값에 예외 없음",
+      unit_mismatch(None, None) is None
+      and unit_mismatch("575,548,870원", [{"text": None}, None]) is None)
+check("검문11 — 메시지에 숫자·두 단위가 들어간다",
+      "'원'로 적었으나 원문 표기는 '천원'" in
+      AUDIT_UNIT_MISMATCH.format(num="575,548,870", got="원", want="천원"))
+
+print()
+print("=" * 74)
 if FAIL:
     print(f"{len(FAIL)}건 실패: " + ", ".join(FAIL))
     sys.exit(1)

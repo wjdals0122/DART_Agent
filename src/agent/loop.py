@@ -751,6 +751,75 @@ def answer_year_mismatch(text, rewrite_info):
         return None
 
 
+# 검문 11 — 답변의 단위 표기가 원문과 다름 (step71).
+#
+# 【실측】 OCI 원문 575,548,870**천원** → 답변 "575,548,870원",
+# 삼성전자 원문 300,870,903**백만원** → 답변 "300,870,903원".
+# 둘 다 '원' 으로 적고 환산 없이 빼서 비교 결론이 정반대가 됐다.
+#
+# 【오탐 방지 — 애매하면 발동하지 않는다】
+#   - 같은 숫자가 여러 청크에 나오거나 원문 단위가 갈리면 판정하지 않는다
+#   - 답변이 환산을 밝혔으면('환산') 발동하지 않는다
+#   - 청크에 "(단위 : …)" 표기가 없으면 발동하지 않는다
+#   - 표 밖 서술 문장의 숫자는 판정하지 않는다(숫자가 '|' 표 행에 있을 때만)
+#   - 답변 단위가 억원이면 판정하지 않는다 — 표에 거의 안 쓰이는 단위라
+#     답변 쪽 환산일 가능성이 높다
+#   - 근거 라벨(대괄호)과 '\n근거' 절 이후는 제외 — 검문 10 과 같은 방식
+AUDIT_UNIT_MISMATCH = (
+    "답변의 {num}를 '{got}'로 적었으나 원문 표기는 '{want}'다. "
+    "원문 단위를 그대로 쓰거나, 환산했다면 calculate 로 환산하고 "
+    "환산 사실을 밝혀라."
+)
+# 긴 단위 먼저 — '백만원' 이 '원' 으로 잘리면 안 된다. 숫자는 5자리 이상만
+# (작은 수는 서술어 속 우연 일치가 많다).
+_NUM_UNIT = re.compile(r"(\d{1,3}(?:,\d{3}){1,}|\d{5,})\s*(십억원|백만원|천원|억원|원)")
+_UNIT_MARK_RE = re.compile(r"\(단위\s*[:：]?\s*([^)]*?)\s*\)")
+
+
+def unit_mismatch(text, documents):
+    """(숫자, 답변 단위, 원문 단위) 또는 None. 예외를 던지지 않는다."""
+    try:
+        body = re.sub(r"\[[^\]]*\]", " ", text or "")
+        body = body.split("\n근거")[0]
+        if "환산" in body:                     # 환산을 밝혔다 — 판정하지 않는다
+            return None
+        for m in _NUM_UNIT.finditer(body):
+            num, got = m.group(1), m.group(2)
+            if got == "억원":                  # 답변 쪽 환산일 가능성 — 판정 안 함
+                continue
+            hit_units = set()
+            n_chunks = 0
+            pat = re.compile(r"(?<![\d,])" + re.escape(num) + r"(?!\d)")
+            for d in (documents or []):
+                t = (d or {}).get("text") or ""
+                found_here = False
+                for mm in pat.finditer(t):
+                    line_start = t.rfind("\n", 0, mm.start()) + 1
+                    line = t[line_start:t.find("\n", mm.start()) if
+                             t.find("\n", mm.start()) != -1 else len(t)]
+                    if not line.lstrip().startswith("|"):
+                        continue               # 표 밖 서술 — 판정하지 않는다
+                    marks = [u for u in _UNIT_MARK_RE.finditer(t)
+                             if u.start() < mm.start()]
+                    if not marks:
+                        continue               # 표 단위 표기가 없다 — 판정하지 않는다
+                    src = marks[-1].group(1).replace(" ", "")
+                    if src in ("원", "천원", "백만원", "억원", "십억원"):
+                        hit_units.add(src)
+                        found_here = True
+                if found_here:
+                    n_chunks += 1
+            if n_chunks == 1 and len(hit_units) == 1:
+                want = hit_units.pop()
+                if want != got:
+                    return num, got, want
+            # 여러 청크·단위 갈림·미발견 — 다음 숫자로
+        return None
+    except Exception:                          # noqa: BLE001 — 검문이 답을 막으면 안 된다
+        traceback.print_exc(file=sys.stderr)
+        return None
+
+
 def announced_but_not_called(text: str, tool_calls: list) -> bool:
     """도구를 부르겠다고 해 놓고 안 불렀나.
 
@@ -1758,6 +1827,10 @@ def _run(question, out, t0, model, max_calls, deadline, verbose, qid=None) -> di
                 elif (tg := answer_year_mismatch(text, out.get("rewrite"))):
                     kind = "year_mismatch"
                     note = AUDIT_YEAR_MISMATCH.format(target=tg[0], got=tg[1])
+                elif (um := unit_mismatch(text, out.get("documents"))):
+                    kind = "unit_mismatch"
+                    note = AUDIT_UNIT_MISMATCH.format(num=um[0], got=um[1],
+                                                      want=um[2])
                 if kind:
                     audited = True
                     prev_answer = text         # 되읊기 방어용 보관 (1-B)
